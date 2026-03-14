@@ -35,11 +35,11 @@ function classifyFailure(err) {
     return { code: "APPWRITE_PERMISSION_DENIED" };
   }
 
-  if (message.includes("Table not found") || message.includes("Database not found") || message.includes("Row not found")) {
+  if (message.includes("Document not found") || message.includes("Collection not found") || message.includes("Database not found")) {
     return { code: "APPWRITE_RESOURCE_NOT_FOUND" };
   }
 
-  return { code: "UNKNOWN" };
+  return { code: "UNKNOWN", details: message };
 }
 
 function createAdminClients() {
@@ -53,7 +53,7 @@ function createAdminClients() {
     .setKey(apiKey);
 
   return {
-    tablesDB: new sdk.TablesDB(client)
+    databases: new sdk.Databases(client)
   };
 }
 
@@ -85,21 +85,21 @@ function ownerPermissions(userId) {
   ];
 }
 
-async function getOrCreateUserRow(tablesDB, userData) {
+async function getOrCreateUserRow(databases, userData) {
   const databaseId = getEnv("APPWRITE_DATABASE_ID");
   const usersTableId = getUsersTableId();
   const starterCredits = Number(getEnv("STARTER_CREDITS", "5"));
 
-  const result = await tablesDB.listRows(databaseId, usersTableId, [
+  const result = await databases.listDocuments(databaseId, usersTableId, [
     sdk.Query.equal("userId", userData.$id),
     sdk.Query.limit(1)
   ]);
 
-  if (result.rows?.length) {
-    return result.rows[0];
+  if (result.documents?.length) {
+    return result.documents[0];
   }
 
-  return tablesDB.createRow(
+  return databases.createDocument(
     databaseId,
     usersTableId,
     sdk.ID.unique(),
@@ -113,21 +113,21 @@ async function getOrCreateUserRow(tablesDB, userData) {
   );
 }
 
-async function updateCredits(tablesDB, userRow, delta) {
+async function updateCredits(databases, userRow, delta) {
   const databaseId = getEnv("APPWRITE_DATABASE_ID");
   const usersTableId = getUsersTableId();
   const nextCredits = Number(userRow.credits || 0) + delta;
 
-  return tablesDB.updateRow(databaseId, usersTableId, userRow.$id, {
+  return databases.updateDocument(databaseId, usersTableId, userRow.$id, {
     credits: nextCredits
   });
 }
 
-async function createTransaction(tablesDB, userId, amount, type) {
+async function createTransaction(databases, userId, amount, type) {
   const databaseId = getEnv("APPWRITE_DATABASE_ID");
   const transactionsTableId = getTransactionsTableId();
 
-  return tablesDB.createRow(
+  return databases.createDocument(
     databaseId,
     transactionsTableId,
     sdk.ID.unique(),
@@ -141,7 +141,7 @@ async function createTransaction(tablesDB, userId, amount, type) {
   );
 }
 
-async function enforceRateLimit(tablesDB, userId) {
+async function enforceRateLimit(databases, userId) {
   const enabled = String(getEnv("RATE_LIMIT_ENABLED", "false")).toLowerCase() === "true";
   if (!enabled) {
     return { limited: false, enforced: false };
@@ -154,7 +154,7 @@ async function enforceRateLimit(tablesDB, userId) {
   const windowHours = Number(getEnv("RATE_LIMIT_WINDOW_HOURS", "1"));
   const windowStart = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
 
-  const recent = await tablesDB.listRows(databaseId, transactionsTableId, [
+  const recent = await databases.listDocuments(databaseId, transactionsTableId, [
     sdk.Query.equal("userId", userId),
     sdk.Query.equal("type", "use"),
     sdk.Query.greaterThanEqual("timestamp", windowStart),
@@ -162,7 +162,7 @@ async function enforceRateLimit(tablesDB, userId) {
   ]);
 
   return {
-    limited: (recent.rows?.length || 0) >= maxPerWindow,
+    limited: (recent.documents?.length || 0) >= maxPerWindow,
     enforced: true
   };
 }
@@ -257,14 +257,14 @@ module.exports = async ({ req, res, log, error }) => {
       return json(res, 401, { ok: false, error: ERROR_CODES.AUTH_REQUIRED });
     }
 
-    const { tablesDB } = createAdminClients();
+    const { databases } = createAdminClients();
 
-    const rate = await enforceRateLimit(tablesDB, userId);
+    const rate = await enforceRateLimit(databases, userId);
     if (rate.limited) {
       return json(res, 429, { ok: false, error: ERROR_CODES.RATE_LIMITED });
     }
 
-    const userRow = await getOrCreateUserRow(tablesDB, authenticated);
+    const userRow = await getOrCreateUserRow(databases, authenticated);
     const currentCredits = Number(userRow.credits || 0);
 
     if (currentCredits < 1) {
@@ -273,8 +273,8 @@ module.exports = async ({ req, res, log, error }) => {
 
     const answers = await callOpenRouter(questions, formTitle);
 
-    const updatedUser = await updateCredits(tablesDB, userRow, -1);
-    await createTransaction(tablesDB, userId, 1, "use");
+    const updatedUser = await updateCredits(databases, userRow, -1);
+    await createTransaction(databases, userId, 1, "use");
 
     return json(res, 200, {
       ok: true,
