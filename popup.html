@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Forms AutoFiller</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="card">
+      <header class="header">
+        <h1>Forms AutoFiller</h1>
+        <p class="subtitle">AI-powered homework solving for Google Forms</p>
+      </header>
+
+      <section id="authView" class="section hidden">
+        <button id="loginBtn" class="btn btn-primary">Sign in with Google</button>
+      </section>
+
+      <section id="appView" class="section hidden">
+        <div class="stats">
+          <p><strong>Email:</strong> <span id="email">-</span></p>
+          <p><strong>Credits:</strong> <span id="credits">0</span></p>
+        </div>
+
+        <div class="actions">
+          <button id="solveBtn" class="btn btn-primary">Solve Form</button>
+          <button id="refreshBtn" class="btn btn-secondary">Refresh Credits</button>
+          <button id="logoutBtn" class="btn btn-ghost">Logout</button>
+        </div>
+      </section>
+
+      <p id="status" class="status"></p>
+    </main>
+
+    <script src="appwrite-web-sdk.js"></script>
+    <script src="popup.js"></script>
+  </body>
+</html>

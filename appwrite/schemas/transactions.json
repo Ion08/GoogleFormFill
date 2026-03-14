@@ -1,0 +1,42 @@
+{
+  "id": "transactions",
+  "name": "transactions",
+  "attributes": [
+    {
+      "key": "userId",
+      "type": "string",
+      "size": 64,
+      "required": true,
+      "array": false
+    },
+    {
+      "key": "amount",
+      "type": "integer",
+      "required": true,
+      "min": 1,
+      "max": 1000000,
+      "array": false
+    },
+    {
+      "key": "type",
+      "type": "string",
+      "size": 20,
+      "required": true,
+      "array": false
+    },
+    {
+      "key": "timestamp",
+      "type": "datetime",
+      "required": true,
+      "array": false
+    }
+  ],
+  "indexes": [
+    {
+      "key": "idx_transactions_user_type_time",
+      "type": "key",
+      "attributes": ["userId", "type", "timestamp"],
+      "orders": ["ASC", "ASC", "DESC"]
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+node_modules/
+appwrite/functions/solveForm/node_modules/
+.DS_Store
+.env

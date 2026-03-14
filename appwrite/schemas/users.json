@@ -1,0 +1,42 @@
+{
+  "id": "users",
+  "name": "users",
+  "attributes": [
+    {
+      "key": "userId",
+      "type": "string",
+      "size": 64,
+      "required": true,
+      "array": false
+    },
+    {
+      "key": "email",
+      "type": "string",
+      "size": 255,
+      "required": true,
+      "array": false
+    },
+    {
+      "key": "credits",
+      "type": "integer",
+      "required": true,
+      "min": 0,
+      "max": 1000000,
+      "array": false
+    },
+    {
+      "key": "createdAt",
+      "type": "datetime",
+      "required": true,
+      "array": false
+    }
+  ],
+  "indexes": [
+    {
+      "key": "idx_users_userId_unique",
+      "type": "unique",
+      "attributes": ["userId"],
+      "orders": ["ASC"]
+    }
+  ]
+}
