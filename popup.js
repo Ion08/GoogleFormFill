@@ -61,8 +61,50 @@ async function bootstrapSdkSession(session) {
 }
 
 function mapErrorToMessage(code) {
+  const normalized = String(code || "").toLowerCase();
+  if (normalized.includes("not authorized") || normalized.includes("invalid origin")) {
+    return "Appwrite rejected this request. Check Function execute permissions and users table read permissions for this user.";
+  }
+
+  if (normalized.includes("receiving end does not exist") || normalized.includes("could not establish connection")) {
+    return "Form helper was not attached yet. Reload the Google Form tab and try Solve again.";
+  }
+
+  if (normalized === "form_parse_error:edit_mode_url") {
+    return "You opened the form editor URL. Open the public form link ending in /viewform and try again.";
+  }
+
+  if (normalized === "form_parse_error:no_entry_fields_found") {
+    return "No fillable form fields were detected. Open the actual question page (not confirmation/preview) and try again.";
+  }
+
+  if (normalized === "form_parse_error:no_supported_questions") {
+    return "Questions were found but not in a supported format yet. Try reloading the form page and then Solve again.";
+  }
+
+  if (normalized === "ai_error:openrouter_api_key_missing") {
+    return "OpenRouter key is missing in Appwrite Function environment variables.";
+  }
+
+  if (normalized.startsWith("ai_error:openrouter_http_401") || normalized.startsWith("ai_error:openrouter_http_403")) {
+    return "OpenRouter rejected the request. Verify PLATFORM_OPENROUTER_KEY in Appwrite Function settings.";
+  }
+
+  if (normalized === "ai_error:appwrite_permission_denied") {
+    return "Appwrite denied backend access. Check APPWRITE_API_KEY scopes for TablesDB read/write and Users read.";
+  }
+
+  if (normalized === "ai_error:appwrite_resource_not_found") {
+    return "Appwrite database/table IDs are incorrect. Verify APPWRITE_DATABASE_ID and table IDs in Function env vars.";
+  }
+
+  if (normalized === "ai_error:no_details_from_function") {
+    return "Backend returned a generic AI error. Redeploy solveForm from latest code, then verify PLATFORM_OPENROUTER_KEY and APPWRITE_API_KEY scopes in Appwrite Function settings.";
+  }
+
   const messages = {
     AUTH_REQUIRED: "Please sign in first.",
+    AUTH_PAGE_LOAD_FAILED: "Google sign-in page could not load. Check Appwrite OAuth provider and redirect domain settings.",
     FORM_PARSE_ERROR: "Could not parse this Google Form.",
     NO_CREDITS: "No credits left. Please top up your account.",
     RATE_LIMITED: "Rate limit reached. Try again later.",
@@ -154,7 +196,8 @@ async function solveForm() {
   try {
     const response = await sendMessage("SOLVE_FORM");
     if (!response?.ok) {
-      throw new Error(response?.error || "AI_ERROR");
+      const detailCode = response?.details?.code;
+      throw new Error(detailCode ? `${response?.error || "AI_ERROR"}:${detailCode}` : (response?.error || "AI_ERROR"));
     }
 
     if (typeof response.creditsLeft === "number") {

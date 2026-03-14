@@ -3,8 +3,8 @@ importScripts("appwrite-web-sdk.js");
 const DEFAULT_CONFIG = {
   appwriteEndpoint: "https://fra.cloud.appwrite.io/v1",
   appwriteProjectId: "69b5015800281183d258",
-  appwriteFunctionSolveId: "YOUR_SOLVE_FORM_FUNCTION_ID",
-  appwriteDatabaseId: "YOUR_DATABASE_ID",
+  appwriteFunctionSolveId: "69b50ac000155a09f932",
+  appwriteDatabaseId: "69b502620001c600ec4b",
   appwriteUsersTableId: "users"
 };
 
@@ -14,9 +14,28 @@ const STORAGE_KEYS = {
   inFlightSolve: "af_in_flight_solve"
 };
 
+function isPlaceholder(value) {
+  return typeof value === "string" && value.startsWith("YOUR_");
+}
+
 async function getConfig() {
   const { [STORAGE_KEYS.config]: saved } = await chrome.storage.local.get(STORAGE_KEYS.config);
-  return { ...DEFAULT_CONFIG, ...(saved || {}) };
+  const merged = { ...DEFAULT_CONFIG, ...(saved || {}) };
+
+  // Keep old storage from pinning placeholders forever.
+  if (isPlaceholder(merged.appwriteFunctionSolveId)) {
+    merged.appwriteFunctionSolveId = DEFAULT_CONFIG.appwriteFunctionSolveId;
+  }
+
+  if (isPlaceholder(merged.appwriteDatabaseId)) {
+    merged.appwriteDatabaseId = DEFAULT_CONFIG.appwriteDatabaseId;
+  }
+
+  if (!merged.appwriteUsersTableId && merged.appwriteUsersCollectionId) {
+    merged.appwriteUsersTableId = merged.appwriteUsersCollectionId;
+  }
+
+  return merged;
 }
 
 async function setSession(session) {
@@ -33,12 +52,28 @@ async function clearSession() {
 }
 
 function buildOAuthUrlWithSdk(config, successRedirect, failureRedirect) {
-  const client = new self.Appwrite.Client()
-    .setEndpoint(config.appwriteEndpoint)
-    .setProject(config.appwriteProjectId);
+  const params = new URLSearchParams({
+    project: config.appwriteProjectId,
+    success: successRedirect,
+    failure: failureRedirect
+  });
 
-  const account = new self.Appwrite.Account(client);
-  return account.createOAuth2Token("google", successRedirect, failureRedirect);
+  return `${config.appwriteEndpoint}/account/tokens/oauth2/google?${params.toString()}`;
+}
+
+function getOAuthCallbackParam(parsedUrl, key) {
+  const searchValue = parsedUrl.searchParams.get(key);
+  if (searchValue) {
+    return searchValue;
+  }
+
+  const rawHash = (parsedUrl.hash || "").replace(/^#/, "");
+  if (!rawHash) {
+    return null;
+  }
+
+  const hashParams = new URLSearchParams(rawHash);
+  return hashParams.get(key);
 }
 
 async function exchangeOAuthToken(config, userId, secret) {
@@ -52,7 +87,15 @@ async function exchangeOAuthToken(config, userId, secret) {
   });
 
   if (!response.ok) {
-    throw new Error(`Session token exchange failed: ${response.status}`);
+    let details = "";
+    try {
+      const body = await response.json();
+      details = body?.message || body?.type || "";
+    } catch {
+      // ignore
+    }
+
+    throw new Error(`Session token exchange failed: ${response.status}${details ? `:${details}` : ""}`);
   }
 
   return response.json();
@@ -155,6 +198,26 @@ async function getActiveFormTab() {
   return tab;
 }
 
+async function sendMessageToFormTab(tabId, message) {
+  try {
+    return await chrome.tabs.sendMessage(tabId, message);
+  } catch (err) {
+    const msg = String(err?.message || "").toLowerCase();
+    const receiverMissing = msg.includes("receiving end does not exist") || msg.includes("could not establish connection");
+
+    if (!receiverMissing) {
+      throw err;
+    }
+
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["content.js"]
+    });
+
+    return chrome.tabs.sendMessage(tabId, message);
+  }
+}
+
 async function withSolveLock(handler) {
   const state = await chrome.storage.local.get(STORAGE_KEYS.inFlightSolve);
   if (state[STORAGE_KEYS.inFlightSolve]) {
@@ -172,18 +235,27 @@ async function withSolveLock(handler) {
 
 async function loginWithGoogle() {
   const config = await getConfig();
-  const redirectUrl = chrome.identity.getRedirectURL("appwrite");
+  const redirectUrl = chrome.identity.getRedirectURL();
   const oauthUrl = buildOAuthUrlWithSdk(config, redirectUrl, redirectUrl);
 
-  const callbackUrl = await chrome.identity.launchWebAuthFlow({
-    url: oauthUrl,
-    interactive: true
-  });
+  let callbackUrl;
+  try {
+    callbackUrl = await chrome.identity.launchWebAuthFlow({
+      url: oauthUrl,
+      interactive: true
+    });
+  } catch (_err) {
+    throw new Error("AUTH_PAGE_LOAD_FAILED");
+  }
+
+  if (!callbackUrl) {
+    throw new Error("AUTH_PAGE_LOAD_FAILED");
+  }
 
   const parsed = new URL(callbackUrl);
-  const userId = parsed.searchParams.get("userId");
-  const secret = parsed.searchParams.get("secret");
-  const error = parsed.searchParams.get("error");
+  const userId = getOAuthCallbackParam(parsed, "userId");
+  const secret = getOAuthCallbackParam(parsed, "secret");
+  const error = getOAuthCallbackParam(parsed, "error");
 
   if (error) {
     throw new Error(`AUTH_ERROR:${error}`);
@@ -193,12 +265,24 @@ async function loginWithGoogle() {
     throw new Error("AUTH_ERROR:missing_user_or_secret");
   }
 
-  await exchangeOAuthToken(config, userId, secret);
-  const user = await getAccount(config, secret);
+  let sessionSecret = secret;
+
+  try {
+    const exchanged = await exchangeOAuthToken(config, userId, secret);
+    sessionSecret = exchanged?.secret || secret;
+  } catch (err) {
+    // Some Appwrite configurations deny /account/sessions/token for this flow.
+    // Fall back to using the OAuth secret directly as session.
+    if (!String(err.message || "").includes("403")) {
+      throw err;
+    }
+  }
+
+  const user = await getAccount(config, sessionSecret);
 
   const session = {
     userId,
-    secret,
+    secret: sessionSecret,
     email: user.email || "",
     name: user.name || "",
     updatedAt: new Date().toISOString()
@@ -275,10 +359,14 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         }
 
         const tab = await getActiveFormTab();
-        const extraction = await chrome.tabs.sendMessage(tab.id, { action: "EXTRACT_FORM" });
+        const extraction = await sendMessageToFormTab(tab.id, { action: "EXTRACT_FORM" });
 
         if (!extraction?.ok || !extraction.form?.questions?.length) {
-          return { ok: false, error: "FORM_PARSE_ERROR" };
+          const detailCode = extraction?.details?.code;
+          return {
+            ok: false,
+            error: detailCode ? `FORM_PARSE_ERROR:${detailCode}` : "FORM_PARSE_ERROR"
+          };
         }
 
         const jwt = await createJwt(config, session.secret);
@@ -292,14 +380,19 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         const solve = await executeSolveFunction(config, session, payload);
 
         if (!solve?.ok) {
+          const fallbackDetails =
+            solve?.error === "AI_ERROR" && !solve?.details
+              ? { code: "NO_DETAILS_FROM_FUNCTION" }
+              : null;
+
           return {
             ok: false,
             error: solve?.error || "AI_ERROR",
-            details: solve?.details || null
+            details: solve?.details || fallbackDetails
           };
         }
 
-        const fillResult = await chrome.tabs.sendMessage(tab.id, {
+        const fillResult = await sendMessageToFormTab(tab.id, {
           action: "FILL_FORM",
           answers: solve.answers
         });

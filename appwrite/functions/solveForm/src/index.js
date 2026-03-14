@@ -24,6 +24,24 @@ function json(res, status, payload) {
   return res.json(payload, status, { "Content-Type": "application/json" });
 }
 
+function classifyFailure(err) {
+  const message = String(err?.message || "");
+
+  if (message.startsWith("OPENROUTER_")) {
+    return { code: message.split(":")[0] };
+  }
+
+  if (message.includes("not authorized") || message.includes("missing scope") || message.includes("permission")) {
+    return { code: "APPWRITE_PERMISSION_DENIED" };
+  }
+
+  if (message.includes("Table not found") || message.includes("Database not found") || message.includes("Row not found")) {
+    return { code: "APPWRITE_RESOURCE_NOT_FOUND" };
+  }
+
+  return { code: "UNKNOWN" };
+}
+
 function createAdminClients() {
   const endpoint = getEnv("APPWRITE_ENDPOINT", "https://fra.cloud.appwrite.io/v1");
   const projectId = getEnv("APPWRITE_PROJECT_ID");
@@ -59,6 +77,14 @@ function getTransactionsTableId() {
   return getEnv("APPWRITE_TRANSACTIONS_TABLE_ID", getEnv("APPWRITE_TRANSACTIONS_COLLECTION_ID", "transactions"));
 }
 
+function ownerPermissions(userId) {
+  return [
+    sdk.Permission.read(sdk.Role.user(userId)),
+    sdk.Permission.update(sdk.Role.user(userId)),
+    sdk.Permission.delete(sdk.Role.user(userId))
+  ];
+}
+
 async function getOrCreateUserRow(tablesDB, userData) {
   const databaseId = getEnv("APPWRITE_DATABASE_ID");
   const usersTableId = getUsersTableId();
@@ -73,12 +99,18 @@ async function getOrCreateUserRow(tablesDB, userData) {
     return result.rows[0];
   }
 
-  return tablesDB.createRow(databaseId, usersTableId, sdk.ID.unique(), {
-    userId: userData.$id,
-    email: userData.email || "",
-    credits: starterCredits,
-    createdAt: new Date().toISOString()
-  });
+  return tablesDB.createRow(
+    databaseId,
+    usersTableId,
+    sdk.ID.unique(),
+    {
+      userId: userData.$id,
+      email: userData.email || "",
+      credits: starterCredits,
+      createdAt: new Date().toISOString()
+    },
+    ownerPermissions(userData.$id)
+  );
 }
 
 async function updateCredits(tablesDB, userRow, delta) {
@@ -95,12 +127,18 @@ async function createTransaction(tablesDB, userId, amount, type) {
   const databaseId = getEnv("APPWRITE_DATABASE_ID");
   const transactionsTableId = getTransactionsTableId();
 
-  return tablesDB.createRow(databaseId, transactionsTableId, sdk.ID.unique(), {
-    userId,
-    amount,
-    type,
-    timestamp: new Date().toISOString()
-  });
+  return tablesDB.createRow(
+    databaseId,
+    transactionsTableId,
+    sdk.ID.unique(),
+    {
+      userId,
+      amount,
+      type,
+      timestamp: new Date().toISOString()
+    },
+    ownerPermissions(userId)
+  );
 }
 
 async function enforceRateLimit(tablesDB, userId) {
@@ -170,7 +208,15 @@ async function callOpenRouter(questions, formTitle) {
   });
 
   if (!response.ok) {
-    throw new Error(`OPENROUTER_HTTP_${response.status}`);
+    let providerMessage = "";
+    try {
+      const errBody = await response.json();
+      providerMessage = errBody?.error?.message || errBody?.message || "";
+    } catch {
+      // ignore parse issues
+    }
+
+    throw new Error(`OPENROUTER_HTTP_${response.status}${providerMessage ? `:${providerMessage}` : ""}`);
   }
 
   const payload = await response.json();
@@ -241,6 +287,10 @@ module.exports = async ({ req, res, log, error }) => {
   } catch (err) {
     error(`solveForm failed: ${err.message}`);
     log(err.stack || "no-stack");
-    return json(res, 500, { ok: false, error: ERROR_CODES.AI_ERROR });
+    return json(res, 500, {
+      ok: false,
+      error: ERROR_CODES.AI_ERROR,
+      details: classifyFailure(err)
+    });
   }
 };
