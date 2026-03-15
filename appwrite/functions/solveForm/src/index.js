@@ -447,11 +447,13 @@ async function callOpenRouter(questions, formTitle, trace = () => {}) {
   const model = getEnv("OPENROUTER_MODEL", "openai/gpt-4o-mini");
   const referer = getEnv("OPENROUTER_REFERER", "");
   const timeoutMs = Number(getEnv("OPENROUTER_TIMEOUT_MS", "600000"));
+  const bodyTimeoutMs = Number(getEnv("OPENROUTER_BODY_TIMEOUT_MS", "45000"));
   const retryCount = Math.max(0, Number(getEnv("OPENROUTER_MAX_RETRIES", "2")));
 
   trace("openrouter.config", {
     model,
     timeoutMs,
+    bodyTimeoutMs,
     retryCount,
     questionSummary: summarizeQuestionSet(questions),
     hasReferer: Boolean(referer)
@@ -463,6 +465,7 @@ async function callOpenRouter(questions, formTitle, trace = () => {}) {
 
   const requestBody = JSON.stringify({
     model,
+    stream: false,
     response_format: { type: "json_object" },
     messages: [
       {
@@ -511,7 +514,7 @@ async function callOpenRouter(questions, formTitle, trace = () => {}) {
         });
         let providerMessage = "";
         try {
-          const rawBody = await readResponseTextWithTimeout(response, timeoutMs);
+          const rawBody = await readResponseTextWithTimeout(response, bodyTimeoutMs);
           const errBody = JSON.parse(rawBody || "{}");
           providerMessage = errBody?.error?.message || errBody?.message || "";
           trace("openrouter.attempt.error_body.read.done", {
@@ -531,7 +534,7 @@ async function callOpenRouter(questions, formTitle, trace = () => {}) {
       trace("openrouter.attempt.body.read.start", {
         attempt: attempt + 1
       });
-      const rawBody = await readResponseTextWithTimeout(response, timeoutMs);
+      const rawBody = await readResponseTextWithTimeout(response, bodyTimeoutMs);
       trace("openrouter.attempt.body.read.done", {
         attempt: attempt + 1,
         elapsedMs: Date.now() - attemptStartedAt,
@@ -569,7 +572,10 @@ async function callOpenRouter(questions, formTitle, trace = () => {}) {
       }
     } catch (err) {
       const message = String(err?.message || "");
-      const retryable = message.startsWith("OPENROUTER_TIMEOUT_") || message.startsWith("OPENROUTER_RETRYABLE_HTTP_");
+      const retryable =
+        message.startsWith("OPENROUTER_TIMEOUT_") ||
+        message.startsWith("OPENROUTER_BODY_TIMEOUT_") ||
+        message.startsWith("OPENROUTER_RETRYABLE_HTTP_");
 
       trace("openrouter.attempt.error", {
         attempt: attempt + 1,

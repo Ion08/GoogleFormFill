@@ -192,7 +192,11 @@ function mapErrorToMessage(code) {
     return "OpenRouter rejected the request. Verify PLATFORM_OPENROUTER_KEY in Appwrite Function settings.";
   }
 
-  if (normalized.startsWith("ai_error:openrouter_timeout_") || normalized.startsWith("ai_error:openrouter_retryable_http_")) {
+  if (
+    normalized.startsWith("ai_error:openrouter_timeout_") ||
+    normalized.startsWith("ai_error:openrouter_body_timeout_") ||
+    normalized.startsWith("ai_error:openrouter_retryable_http_")
+  ) {
     return "The form is taking longer to solve. Please wait and retry once; backend retries are enabled for long forms.";
   }
 
