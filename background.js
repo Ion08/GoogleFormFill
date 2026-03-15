@@ -162,33 +162,81 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function tryParseJsonText(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+function decodeBase64IfPossible(value) {
+  const text = String(value || "").trim();
+  if (!text || text.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(text)) {
+    return null;
+  }
+
+  try {
+    return atob(text);
+  } catch {
+    return null;
+  }
+}
+
+function coerceParsedPayload(value) {
+  if (!value) return null;
+
+  if (typeof value === "object") {
+    return value;
+  }
+
+  const text = String(value).trim();
+  if (!text) return null;
+
+  const direct = tryParseJsonText(text);
+  if (direct && typeof direct === "object") {
+    return direct;
+  }
+
+  if (typeof direct === "string") {
+    const secondPass = tryParseJsonText(direct);
+    if (secondPass && typeof secondPass === "object") {
+      return secondPass;
+    }
+  }
+
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    const sliced = text.slice(firstBrace, lastBrace + 1);
+    const extracted = tryParseJsonText(sliced);
+    if (extracted && typeof extracted === "object") {
+      return extracted;
+    }
+  }
+
+  const decoded = decodeBase64IfPossible(text);
+  if (decoded) {
+    const fromDecoded = tryParseJsonText(decoded);
+    if (fromDecoded && typeof fromDecoded === "object") {
+      return fromDecoded;
+    }
+  }
+
+  return null;
+}
+
 function parseExecutionBody(execution) {
   const rawCandidates = [
     execution?.responseBody,
+    execution?.response?.body,
     execution?.response,
     execution?.stdout
   ];
 
   for (const raw of rawCandidates) {
-    if (!raw) continue;
-    const text = String(raw).trim();
-    if (!text) continue;
-
-    try {
-      return JSON.parse(text);
-    } catch {
-      // Some runtimes prepend logs to JSON. Try extracting the first JSON object.
-      const firstBrace = text.indexOf("{");
-      const lastBrace = text.lastIndexOf("}");
-      if (firstBrace >= 0 && lastBrace > firstBrace) {
-        const maybeJson = text.slice(firstBrace, lastBrace + 1);
-        try {
-          return JSON.parse(maybeJson);
-        } catch {
-          // continue trying remaining fields
-        }
-      }
-    }
+    const parsed = coerceParsedPayload(raw);
+    if (parsed) return parsed;
   }
 
   return null;
