@@ -683,7 +683,25 @@ function fillAnswers(results) {
     return { ok: false, error: "FORM_PARSE_ERROR" };
   }
 
-  const fillResults = results.map(fillQuestionResult);
+  const total = results.length;
+  const fillResults = [];
+
+  results.forEach((item, index) => {
+    fillResults.push(fillQuestionResult(item));
+
+    const processed = index + 1;
+    const percent = total > 0 ? 70 + Math.round((processed / total) * 25) : 95;
+    chrome.runtime.sendMessage({
+      action: "SOLVE_PROGRESS_UPDATE",
+      phase: "filling",
+      processed,
+      total,
+      percent,
+      text: `Filling form: ${processed}/${total}`
+    }).catch(() => {
+      // Popup may be closed.
+    });
+  });
 
   return {
     ok: true,

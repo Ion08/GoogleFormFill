@@ -302,6 +302,34 @@ function summarizeResults(results) {
   };
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableStatus(status) {
+  return [408, 409, 425, 429, 500, 502, 503, 504, 524].includes(Number(status));
+}
+
+async function fetchOpenRouterWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      ...options,
+      signal: controller.signal
+    });
+  } catch (err) {
+    if (err?.name === "AbortError") {
+      throw new Error(`OPENROUTER_TIMEOUT_${timeoutMs}`);
+    }
+
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function createJwtAccountClient(jwt) {
   const endpoint = getEnv("APPWRITE_ENDPOINT", "https://fra.cloud.appwrite.io/v1");
   const projectId = getEnv("APPWRITE_PROJECT_ID");
@@ -415,59 +443,83 @@ async function callOpenRouter(questions, formTitle) {
   const apiKey = getEnv("OPENROUTER_API_KEY") || getEnv("PLATFORM_OPENROUTER_KEY");
   const model = getEnv("OPENROUTER_MODEL", "openai/gpt-4o-mini");
   const referer = getEnv("OPENROUTER_REFERER", "");
+  const timeoutMs = Number(getEnv("OPENROUTER_TIMEOUT_MS", "120000"));
+  const retryCount = Math.max(0, Number(getEnv("OPENROUTER_MAX_RETRIES", "2")));
 
   if (!apiKey) {
     throw new Error("OPENROUTER_API_KEY_MISSING");
   }
 
-  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-      ...(referer ? { "HTTP-Referer": referer } : {})
-    },
-    body: JSON.stringify({
-      model,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content: "Return only valid JSON. Solve common Google Form question types, skip personal-data prompts, and provide short explanations."
-        },
-        {
-          role: "user",
-          content: buildMultimodalMessage(formTitle, questions)
-        }
-      ],
-      temperature: 0.2
-    })
+  const requestBody = JSON.stringify({
+    model,
+    response_format: { type: "json_object" },
+    messages: [
+      {
+        role: "system",
+        content: "Return only valid JSON. Solve common Google Form question types, skip personal-data prompts, and provide short explanations."
+      },
+      {
+        role: "user",
+        content: buildMultimodalMessage(formTitle, questions)
+      }
+    ],
+    temperature: 0.2
   });
 
-  if (!response.ok) {
-    let providerMessage = "";
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
     try {
-      const errBody = await response.json();
-      providerMessage = errBody?.error?.message || errBody?.message || "";
-    } catch {
-      // ignore parse issues
+      const response = await fetchOpenRouterWithTimeout(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+            ...(referer ? { "HTTP-Referer": referer } : {})
+          },
+          body: requestBody
+        },
+        timeoutMs
+      );
+
+      if (!response.ok) {
+        let providerMessage = "";
+        try {
+          const errBody = await response.json();
+          providerMessage = errBody?.error?.message || errBody?.message || "";
+        } catch {
+          // ignore parse issues
+        }
+
+        const codePrefix = isRetryableStatus(response.status) ? "OPENROUTER_RETRYABLE_HTTP_" : "OPENROUTER_HTTP_";
+        throw new Error(`${codePrefix}${response.status}${providerMessage ? `:${providerMessage}` : ""}`);
+      }
+
+      const payload = await response.json();
+      const content = payload.choices?.[0]?.message?.content;
+
+      if (!content) {
+        throw new Error("OPENROUTER_EMPTY_CONTENT");
+      }
+
+      try {
+        return extractQuestionPayload(JSON.parse(content));
+      } catch {
+        throw new Error("OPENROUTER_INVALID_JSON");
+      }
+    } catch (err) {
+      const message = String(err?.message || "");
+      const retryable = message.startsWith("OPENROUTER_TIMEOUT_") || message.startsWith("OPENROUTER_RETRYABLE_HTTP_");
+
+      if (!retryable || attempt >= retryCount) {
+        throw err;
+      }
+
+      await sleep(1200 * (attempt + 1));
     }
-
-    throw new Error(`OPENROUTER_HTTP_${response.status}${providerMessage ? `:${providerMessage}` : ""}`);
   }
 
-  const payload = await response.json();
-  const content = payload.choices?.[0]?.message?.content;
-
-  if (!content) {
-    throw new Error("OPENROUTER_EMPTY_CONTENT");
-  }
-
-  try {
-    return extractQuestionPayload(JSON.parse(content));
-  } catch {
-    throw new Error("OPENROUTER_INVALID_JSON");
-  }
+  throw new Error("OPENROUTER_RETRIES_EXHAUSTED");
 }
 
 module.exports = async ({ req, res, log, error }) => {

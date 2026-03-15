@@ -3,7 +3,12 @@ const state = {
   session: null,
   credits: 0,
   sdkReady: false,
-  lastReport: null
+  lastReport: null,
+  progress: {
+    active: false,
+    percent: 0,
+    text: "Waiting to start..."
+  }
 };
 
 const ui = {
@@ -12,6 +17,10 @@ const ui = {
   email: document.getElementById("email"),
   credits: document.getElementById("credits"),
   status: document.getElementById("status"),
+  progressPanel: document.getElementById("progressPanel"),
+  progressPercent: document.getElementById("progressPercent"),
+  progressText: document.getElementById("progressText"),
+  progressBar: document.getElementById("progressBar"),
   reportPanel: document.getElementById("reportPanel"),
   reportSummary: document.getElementById("reportSummary"),
   reportList: document.getElementById("reportList"),
@@ -38,7 +47,40 @@ function render() {
 
   ui.email.textContent = state.session?.email || "Unknown";
   ui.credits.textContent = String(state.credits ?? 0);
+  renderProgress();
   renderReport();
+}
+
+function updateProgress(percent, text, active = true) {
+  const numeric = Number.isFinite(Number(percent)) ? Number(percent) : 0;
+  state.progress.percent = Math.max(0, Math.min(100, Math.round(numeric)));
+  state.progress.text = text || state.progress.text || "Processing...";
+  state.progress.active = active;
+  renderProgress();
+}
+
+function resetProgress() {
+  state.progress = {
+    active: false,
+    percent: 0,
+    text: "Waiting to start..."
+  };
+  renderProgress();
+}
+
+function renderProgress() {
+  if (!state.progress.active) {
+    ui.progressPanel.classList.add("hidden");
+    ui.progressBar.style.width = "0%";
+    ui.progressPercent.textContent = "0%";
+    ui.progressText.textContent = "Waiting to start...";
+    return;
+  }
+
+  ui.progressPanel.classList.remove("hidden");
+  ui.progressBar.style.width = `${state.progress.percent}%`;
+  ui.progressPercent.textContent = `${state.progress.percent}%`;
+  ui.progressText.textContent = state.progress.text;
 }
 
 function formatConfidence(value) {
@@ -150,6 +192,14 @@ function mapErrorToMessage(code) {
     return "OpenRouter rejected the request. Verify PLATFORM_OPENROUTER_KEY in Appwrite Function settings.";
   }
 
+  if (normalized.startsWith("ai_error:openrouter_timeout_") || normalized.startsWith("ai_error:openrouter_retryable_http_")) {
+    return "The form is taking longer to solve. Please wait and retry once; backend retries are enabled for long forms.";
+  }
+
+  if (normalized === "ai_error:openrouter_retries_exhausted") {
+    return "The AI service is slow right now and retries were exhausted. Please try again in a moment.";
+  }
+
   if (normalized === "ai_error:appwrite_permission_denied") {
     return "Appwrite denied backend access. Check APPWRITE_API_KEY scopes for TablesDB read/write and Users read.";
   }
@@ -232,6 +282,7 @@ async function logout() {
   state.credits = 0;
   state.sdkReady = false;
   state.lastReport = null;
+  resetProgress();
   setStatus("Logged out.", "info");
   render();
 }
@@ -252,6 +303,7 @@ async function refreshCredits() {
 
 async function solveForm() {
   ui.solveBtn.disabled = true;
+  updateProgress(1, "Starting solve flow...");
   setStatus("Extracting and solving form...");
 
   try {
@@ -267,6 +319,11 @@ async function solveForm() {
 
     state.lastReport = response.report || null;
 
+  const total = Number(response?.report?.summary?.total || 0);
+  const filled = Number(response?.report?.summary?.filled || 0);
+  const processedPercent = total > 0 ? Math.round((filled / total) * 100) : 100;
+  updateProgress(100, `Done. Filled ${filled}/${total || 0} questions (${processedPercent}%).`, true);
+
     render();
     if (response.report?.summary) {
       setStatus(
@@ -277,11 +334,28 @@ async function solveForm() {
       setStatus(`Solved and filled ${response.filled || 0} question(s).`, "success");
     }
   } catch (err) {
+    resetProgress();
     setStatus(mapErrorToMessage(err.message), "error");
   } finally {
     ui.solveBtn.disabled = false;
   }
 }
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (message?.action !== "SOLVE_PROGRESS_EVENT") {
+    return;
+  }
+
+  const percent = Number(message.percent || 0);
+  const text = String(message.text || "Processing...");
+  const done = Boolean(message.done);
+  updateProgress(percent, text, true);
+
+  if (done) {
+    state.progress.active = true;
+    renderProgress();
+  }
+});
 
 ui.loginBtn.addEventListener("click", login);
 ui.logoutBtn.addEventListener("click", logout);

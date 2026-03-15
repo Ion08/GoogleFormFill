@@ -29,6 +29,17 @@
           <button id="logoutBtn" class="btn btn-ghost">Logout</button>
         </div>
 
+        <section id="progressPanel" class="progress hidden" aria-live="polite">
+          <div class="progress-head">
+            <h2>Processing Form</h2>
+            <span id="progressPercent" class="progress-percent">0%</span>
+          </div>
+          <p id="progressText" class="progress-text">Waiting to start...</p>
+          <div class="progress-track">
+            <div id="progressBar" class="progress-bar"></div>
+          </div>
+        </section>
+
         <section id="reportPanel" class="report hidden">
           <div class="report-header">
             <div>

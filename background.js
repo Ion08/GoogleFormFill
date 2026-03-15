@@ -187,6 +187,17 @@ async function executeSolveFunction(config, session, payload) {
   return responseBody;
 }
 
+function emitSolveProgress(percent, text, extra = {}) {
+  chrome.runtime.sendMessage({
+    action: "SOLVE_PROGRESS_EVENT",
+    percent,
+    text,
+    ...extra
+  }).catch(() => {
+    // Popup may be closed; ignore progress delivery errors.
+  });
+}
+
 function humanizeReportReason(code) {
   const labels = {
     answered: "Answered",
@@ -378,6 +389,17 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   (async () => {
     const config = await getConfig();
 
+    if (request?.action === "SOLVE_PROGRESS_UPDATE") {
+      emitSolveProgress(request.percent, request.text, {
+        phase: request.phase,
+        processed: request.processed,
+        total: request.total,
+        done: request.done
+      });
+      sendResponse({ ok: true });
+      return;
+    }
+
     if (request?.action === "AUTH_LOGIN") {
       const result = await loginWithGoogle();
       sendResponse({ ok: true, ...result });
@@ -415,11 +437,13 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
     if (request?.action === "SOLVE_FORM") {
       const result = await withSolveLock(async () => {
+        emitSolveProgress(3, "Checking session...");
         const session = await getSession();
         if (!session) {
           return { ok: false, error: "AUTH_REQUIRED" };
         }
 
+        emitSolveProgress(10, "Extracting form questions...");
         const tab = await getActiveFormTab();
         const extraction = await sendMessageToFormTab(tab.id, { action: "EXTRACT_FORM" });
 
@@ -432,6 +456,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         }
 
         const jwt = await createJwt(config, session.secret);
+        emitSolveProgress(35, "Sending questions to AI...");
         const payload = {
           userId: session.userId,
           jwt,
@@ -454,6 +479,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
           };
         }
 
+        emitSolveProgress(70, "Applying answers to the form...");
         const fillResult = await sendMessageToFormTab(tab.id, {
           action: "FILL_FORM",
           results: solve.results || []
@@ -464,6 +490,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         }
 
         const report = mergeSolveAndFillResults(solve.results || [], fillResult.results || []);
+        emitSolveProgress(100, "Solve completed.", { done: true });
 
         return {
           ok: true,
