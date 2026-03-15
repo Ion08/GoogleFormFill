@@ -356,6 +356,36 @@ async function executeSolveFunction(config, session, payload) {
     .setSession(session.secret);
   const functions = new self.Appwrite.Functions(client);
 
+  // Try sync execution first because Appwrite async polling may omit responseBody
+  // even when status is completed with HTTP 200.
+  try {
+    const syncExecution = await functions.createExecution({
+      functionId: config.appwriteFunctionSolveId,
+      body: JSON.stringify(payload),
+      async: false,
+      path: "/solve",
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    });
+
+    const syncParsed = parseExecutionBody(syncExecution);
+    if (syncParsed && typeof syncParsed === "object") {
+      return syncParsed;
+    }
+  } catch (err) {
+    const message = String(err?.message || "").toLowerCase();
+    const syncTimedOut =
+      message.includes("synchronous function execution timed out") ||
+      message.includes("function execution timed out") ||
+      message.includes("timed out");
+
+    if (!syncTimedOut) {
+      throw err;
+    }
+
+    emitSolveProgress(40, "Sync execution timed out. Switching to async polling...");
+  }
+
   let createdExecution;
   try {
     createdExecution = await functions.createExecution({
