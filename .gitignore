@@ -2,3 +2,4 @@ node_modules/
 appwrite/functions/solveForm/node_modules/
 .DS_Store
 .env
+.google_forms_token.json

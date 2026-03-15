@@ -158,33 +158,105 @@ async function getUserCredits(config, session) {
   return { credits: Number(userRow.credits || 0) };
 }
 
-async function executeSolveFunction(config, session, payload) {
-  const response = await fetch(
-    `${config.appwriteEndpoint}/functions/${config.appwriteFunctionSolveId}/executions`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Appwrite-Project": config.appwriteProjectId,
-        "X-Appwrite-Session": session.secret
-      },
-      body: JSON.stringify({
-        async: false,
-        body: JSON.stringify(payload),
-        path: "/solve",
-        method: "POST",
-        headers: { "Content-Type": "application/json" }
-      })
-    }
-  );
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-  if (!response.ok) {
-    throw new Error(`Function execution failed: ${response.status}`);
+function parseExecutionBody(execution) {
+  if (!execution?.responseBody) {
+    return null;
   }
 
-  const execution = await response.json();
-  const responseBody = execution.responseBody ? JSON.parse(execution.responseBody) : null;
-  return responseBody;
+  try {
+    return JSON.parse(execution.responseBody);
+  } catch {
+    return null;
+  }
+}
+
+function isTerminalExecutionStatus(status) {
+  const normalized = String(status || "").toLowerCase();
+  return ["completed", "succeeded", "failed", "canceled", "cancelled", "done"].includes(normalized);
+}
+
+function isFailedExecutionStatus(status) {
+  const normalized = String(status || "").toLowerCase();
+  return ["failed", "canceled", "cancelled"].includes(normalized);
+}
+
+async function fetchExecution(config, session, executionId) {
+  const client = new self.Appwrite.Client()
+    .setEndpoint(config.appwriteEndpoint)
+    .setProject(config.appwriteProjectId)
+    .setSession(session.secret);
+  const functions = new self.Appwrite.Functions(client);
+
+  return functions.getExecution({
+    functionId: config.appwriteFunctionSolveId,
+    executionId
+  });
+}
+
+async function executeSolveFunction(config, session, payload) {
+  const pollIntervalMs = Number(config.functionExecutionPollIntervalMs || 1500);
+  const waitTimeoutMs = Number(config.functionExecutionWaitTimeoutMs || 12 * 60 * 1000);
+  const startedAt = Date.now();
+
+  const client = new self.Appwrite.Client()
+    .setEndpoint(config.appwriteEndpoint)
+    .setProject(config.appwriteProjectId)
+    .setSession(session.secret);
+  const functions = new self.Appwrite.Functions(client);
+
+  let createdExecution;
+  try {
+    createdExecution = await functions.createExecution({
+      functionId: config.appwriteFunctionSolveId,
+      body: JSON.stringify(payload),
+      async: true,
+      xpath: "/solve",
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    });
+  } catch (err) {
+    const message = String(err?.message || "");
+    if (message.toLowerCase().includes("synchronous function execution timed out")) {
+      throw new Error("FUNCTION_EXECUTION_FORCE_SYNC_TIMEOUT");
+    }
+    throw err;
+  }
+  const executionId = createdExecution?.$id || createdExecution?.id;
+
+  if (!executionId) {
+    throw new Error("FUNCTION_EXECUTION_ID_MISSING");
+  }
+
+  emitSolveProgress(40, "Function started. Waiting for completion...");
+
+  while (Date.now() - startedAt < waitTimeoutMs) {
+    const execution = await fetchExecution(config, session, executionId);
+    const status = execution?.status || "unknown";
+
+    if (isTerminalExecutionStatus(status)) {
+      const parsed = parseExecutionBody(execution);
+      if (parsed && typeof parsed === "object") {
+        return parsed;
+      }
+
+      if (isFailedExecutionStatus(status)) {
+        throw new Error(`FUNCTION_EXECUTION_${String(status).toUpperCase()}`);
+      }
+
+      throw new Error("FUNCTION_EXECUTION_EMPTY_RESPONSE");
+    }
+
+    const waitedRatio = Math.min(1, (Date.now() - startedAt) / waitTimeoutMs);
+    const progress = 40 + Math.round(waitedRatio * 25);
+    emitSolveProgress(progress, `Waiting for function... status: ${status}`);
+    await sleep(pollIntervalMs);
+  }
+
+  throw new Error("FUNCTION_EXECUTION_TIMEOUT");
 }
 
 function emitSolveProgress(percent, text, extra = {}) {

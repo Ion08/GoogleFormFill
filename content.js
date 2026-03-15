@@ -554,6 +554,19 @@ function fillShortAnswer(id, value) {
   return { filled: true };
 }
 
+function fillShortAnswerByQuestionText(questionText, value) {
+  const block = findQuestionBlockByText(questionText, "SHORT_ANSWER");
+  if (!block) return { filled: false, reason: "field_not_found" };
+
+  const input = block.querySelector('input[type="text"], input[type="email"], input:not([type])');
+  if (!input) return { filled: false, reason: "field_not_found" };
+
+  input.focus();
+  input.value = String(value ?? "");
+  dispatchInputEvents(input);
+  return { filled: true };
+}
+
 function findQuestionInputByNumericId(id) {
   const safeId = String(id || "").replace(/[^0-9]/g, "");
   if (!safeId) return null;
@@ -578,6 +591,19 @@ function fillTextByNumericId(id, value) {
 function fillParagraph(id, value) {
   const textarea = document.querySelector(`textarea[name="${CSS.escape(id)}"]`);
   if (!textarea) return { filled: false, reason: "field_not_found" };
+  textarea.focus();
+  textarea.value = String(value ?? "");
+  dispatchInputEvents(textarea);
+  return { filled: true };
+}
+
+function fillParagraphByQuestionText(questionText, value) {
+  const block = findQuestionBlockByText(questionText, "PARAGRAPH");
+  if (!block) return { filled: false, reason: "field_not_found" };
+
+  const textarea = block.querySelector("textarea");
+  if (!textarea) return { filled: false, reason: "field_not_found" };
+
   textarea.focus();
   textarea.value = String(value ?? "");
   dispatchInputEvents(textarea);
@@ -689,18 +715,27 @@ function fillQuestionResult(result) {
   }
 
   let outcome = { filled: false, reason: "unsupported_question_type" };
+  const numericLookupAttempted = /^\d+$/.test(String(result.id || "")) && ["SHORT_ANSWER", "PARAGRAPH"].includes(result.type);
 
-  if (/^\d+$/.test(String(result.id || "")) && ["SHORT_ANSWER", "PARAGRAPH"].includes(result.type)) {
+  if (numericLookupAttempted) {
     outcome = fillTextByNumericId(result.id, result.answer);
-  } else if (result.type === "SHORT_ANSWER") {
+  }
+
+  if (!outcome.filled && result.type === "SHORT_ANSWER") {
     outcome = fillShortAnswer(result.id, result.answer);
-  } else if (result.type === "PARAGRAPH") {
+    if (!outcome.filled) {
+      outcome = fillShortAnswerByQuestionText(result.question, result.answer);
+    }
+  } else if (!outcome.filled && result.type === "PARAGRAPH") {
     outcome = fillParagraph(result.id, result.answer);
-  } else if (result.type === "MULTIPLE_CHOICE") {
+    if (!outcome.filled) {
+      outcome = fillParagraphByQuestionText(result.question, result.answer);
+    }
+  } else if (!outcome.filled && result.type === "MULTIPLE_CHOICE") {
     outcome = fillMultipleChoice(result.id, result.answer, result.question);
-  } else if (result.type === "CHECKBOX") {
+  } else if (!outcome.filled && result.type === "CHECKBOX") {
     outcome = fillCheckbox(result.id, result.answer, result.question);
-  } else if (result.type === "DROPDOWN") {
+  } else if (!outcome.filled && result.type === "DROPDOWN") {
     outcome = fillDropdown(result.id, result.answer);
   }
 

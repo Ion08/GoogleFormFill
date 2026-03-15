@@ -172,6 +172,18 @@ function mapErrorToMessage(code) {
     return "Form helper was not attached yet. Reload the Google Form tab and try Solve again.";
   }
 
+  if (normalized === "function_execution_timeout" || normalized.includes("function execution timed out")) {
+    return "The backend is still processing and exceeded the wait window. Try again in a moment or increase function timeout in Appwrite.";
+  }
+
+  if (normalized === "function_execution_force_sync_timeout") {
+    return "Appwrite still handled this execution synchronously and hit the 30s limit. Reload the extension, then redeploy/check function execution settings in Appwrite.";
+  }
+
+  if (normalized.startsWith("function_execution_failed") || normalized.startsWith("function_execution_canceled")) {
+    return "Function execution failed before returning a valid response. Check Appwrite execution logs for the latest run.";
+  }
+
   if (normalized === "form_parse_error:edit_mode_url") {
     return "You opened the form editor URL. Open the public form link ending in /viewform and try again.";
   }
