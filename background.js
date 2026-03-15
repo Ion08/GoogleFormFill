@@ -163,15 +163,35 @@ function sleep(ms) {
 }
 
 function parseExecutionBody(execution) {
-  if (!execution?.responseBody) {
-    return null;
+  const rawCandidates = [
+    execution?.responseBody,
+    execution?.response,
+    execution?.stdout
+  ];
+
+  for (const raw of rawCandidates) {
+    if (!raw) continue;
+    const text = String(raw).trim();
+    if (!text) continue;
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      // Some runtimes prepend logs to JSON. Try extracting the first JSON object.
+      const firstBrace = text.indexOf("{");
+      const lastBrace = text.lastIndexOf("}");
+      if (firstBrace >= 0 && lastBrace > firstBrace) {
+        const maybeJson = text.slice(firstBrace, lastBrace + 1);
+        try {
+          return JSON.parse(maybeJson);
+        } catch {
+          // continue trying remaining fields
+        }
+      }
+    }
   }
 
-  try {
-    return JSON.parse(execution.responseBody);
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 function isTerminalExecutionStatus(status) {
@@ -182,6 +202,41 @@ function isTerminalExecutionStatus(status) {
 function isFailedExecutionStatus(status) {
   const normalized = String(status || "").toLowerCase();
   return ["failed", "canceled", "cancelled"].includes(normalized);
+}
+
+function getExecutionStatusCode(execution) {
+  const code = Number(execution?.responseStatusCode);
+  return Number.isFinite(code) ? code : null;
+}
+
+function getExecutionErrorHint(execution) {
+  const raw =
+    execution?.errors ||
+    execution?.stderr ||
+    execution?.logs ||
+    execution?.message ||
+    "";
+  const text = String(raw || "").replace(/\s+/g, " ").trim();
+  return text ? text.slice(0, 240) : "";
+}
+
+async function tryGetTerminalExecutionBody(config, session, execution, pollIntervalMs) {
+  let current = execution;
+  const bodySettleAttempts = 5;
+
+  for (let i = 0; i < bodySettleAttempts; i++) {
+    const parsed = parseExecutionBody(current);
+    if (parsed && typeof parsed === "object") {
+      return { parsed, execution: current };
+    }
+
+    if (i < bodySettleAttempts - 1) {
+      await sleep(Math.max(300, Math.min(1200, pollIntervalMs)));
+      current = await fetchExecution(config, session, current?.$id || current?.id);
+    }
+  }
+
+  return { parsed: null, execution: current };
 }
 
 async function fetchExecution(config, session, executionId) {
@@ -238,7 +293,12 @@ async function executeSolveFunction(config, session, payload) {
     const status = execution?.status || "unknown";
 
     if (isTerminalExecutionStatus(status)) {
-      const parsed = parseExecutionBody(execution);
+      const { parsed, execution: terminalExecution } = await tryGetTerminalExecutionBody(
+        config,
+        session,
+        execution,
+        pollIntervalMs
+      );
       if (parsed && typeof parsed === "object") {
         return parsed;
       }
@@ -247,7 +307,18 @@ async function executeSolveFunction(config, session, payload) {
         throw new Error(`FUNCTION_EXECUTION_${String(status).toUpperCase()}`);
       }
 
-      throw new Error("FUNCTION_EXECUTION_EMPTY_RESPONSE");
+      const responseStatusCode = getExecutionStatusCode(terminalExecution);
+      if (responseStatusCode !== null && responseStatusCode >= 400) {
+        const hint = getExecutionErrorHint(terminalExecution);
+        throw new Error(
+          `FUNCTION_EXECUTION_HTTP_${responseStatusCode}${hint ? `:${hint}` : ""}`
+        );
+      }
+
+      const hint = getExecutionErrorHint(terminalExecution);
+      throw new Error(
+        `FUNCTION_EXECUTION_EMPTY_RESPONSE${hint ? `:${hint}` : ""}`
+      );
     }
 
     const waitedRatio = Math.min(1, (Date.now() - startedAt) / waitTimeoutMs);

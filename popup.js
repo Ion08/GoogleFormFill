@@ -184,6 +184,14 @@ function mapErrorToMessage(code) {
     return "Function execution failed before returning a valid response. Check Appwrite execution logs for the latest run.";
   }
 
+  if (normalized.startsWith("function_execution_http_")) {
+    return "Function execution returned an HTTP error. Open Appwrite Function execution details/logs for the latest run to inspect the backend error payload.";
+  }
+
+  if (normalized.startsWith("function_execution_empty_response")) {
+    return "Function finished but returned no parseable JSON response. Check the latest Appwrite execution logs and confirm the deployed function returns res.json(...) on all code paths.";
+  }
+
   if (normalized === "form_parse_error:edit_mode_url") {
     return "You opened the form editor URL. Open the public form link ending in /viewform and try again.";
   }
