@@ -498,6 +498,39 @@ function findQuestionBlockById(id) {
   return null;
 }
 
+function blockHasTypeControls(block, type) {
+  if (!block) return false;
+
+  if (type === "MULTIPLE_CHOICE") {
+    return Boolean(block.querySelector('input[type="radio"], [role="radio"]'));
+  }
+
+  if (type === "CHECKBOX") {
+    return Boolean(block.querySelector('input[type="checkbox"], [role="checkbox"]'));
+  }
+
+  return true;
+}
+
+function findQuestionBlockByText(questionText, type) {
+  const target = normalizeForMatch(questionText || "");
+  if (!target) return null;
+
+  const blocks = Array.from(document.querySelectorAll('[role="listitem"], .Qr7Oae'));
+  return blocks.find((block) => {
+    if (!blockHasTypeControls(block, type)) {
+      return false;
+    }
+
+    const title = normalizeForMatch(findQuestionTitle(block));
+    if (!title) {
+      return false;
+    }
+
+    return title === target || title.includes(target) || target.includes(title);
+  }) || null;
+}
+
 function chooseBestOption(elements, expected) {
   const normalizedExpected = normalizeForMatch(expected);
   if (!normalizedExpected) {
@@ -551,7 +584,7 @@ function fillParagraph(id, value) {
   return { filled: true };
 }
 
-function fillMultipleChoice(id, value) {
+function fillMultipleChoice(id, value, questionText) {
   const radios = Array.from(document.querySelectorAll(`input[type="radio"][name="${CSS.escape(id)}"]`));
   if (radios.length) {
     const target = chooseBestOption(radios, value);
@@ -563,7 +596,7 @@ function fillMultipleChoice(id, value) {
     return { filled: true };
   }
 
-  const block = findQuestionBlockById(id);
+  const block = findQuestionBlockById(id) || findQuestionBlockByText(questionText, "MULTIPLE_CHOICE");
   const roleRadios = block ? Array.from(block.querySelectorAll('[role="radio"]')) : [];
   if (!roleRadios.length) {
     return { filled: false, reason: "field_not_found" };
@@ -579,7 +612,7 @@ function fillMultipleChoice(id, value) {
   return { filled: true };
 }
 
-function fillCheckbox(id, values) {
+function fillCheckbox(id, values, questionText) {
   const expected = new Set((Array.isArray(values) ? values : [values]).map((value) => normalizeForMatch(value)).filter(Boolean));
   const boxes = Array.from(document.querySelectorAll(`input[type="checkbox"][name="${CSS.escape(id)}"]`));
   if (boxes.length) {
@@ -603,7 +636,7 @@ function fillCheckbox(id, values) {
     return { filled: toggled > 0 || expected.size > 0, reason: expected.size ? undefined : "empty_selection" };
   }
 
-  const block = findQuestionBlockById(id);
+  const block = findQuestionBlockById(id) || findQuestionBlockByText(questionText, "CHECKBOX");
   const roleBoxes = block ? Array.from(block.querySelectorAll('[role="checkbox"]')) : [];
   if (!roleBoxes.length) {
     return { filled: false, reason: "field_not_found" };
@@ -664,9 +697,9 @@ function fillQuestionResult(result) {
   } else if (result.type === "PARAGRAPH") {
     outcome = fillParagraph(result.id, result.answer);
   } else if (result.type === "MULTIPLE_CHOICE") {
-    outcome = fillMultipleChoice(result.id, result.answer);
+    outcome = fillMultipleChoice(result.id, result.answer, result.question);
   } else if (result.type === "CHECKBOX") {
-    outcome = fillCheckbox(result.id, result.answer);
+    outcome = fillCheckbox(result.id, result.answer, result.question);
   } else if (result.type === "DROPDOWN") {
     outcome = fillDropdown(result.id, result.answer);
   }
