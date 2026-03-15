@@ -14,7 +14,9 @@ function getEnv(name, fallback = "") {
 
 function parseJsonBody(req) {
   try {
-    return req.body ? JSON.parse(req.body) : {};
+    if (!req.body) return {};
+    if (typeof req.body === "string") return JSON.parse(req.body);
+    return req.body;
   } catch {
     return null;
   }

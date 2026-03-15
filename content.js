@@ -254,6 +254,37 @@ function extractQuestionsFromEntriesFallback() {
   return Array.from(byId.values());
 }
 
+function extractQuestionsFromDataParamsFallback() {
+  const questions = [];
+  const seen = new Set();
+
+  Array.from(document.querySelectorAll("script")).forEach((script) => {
+    const match = (script.textContent || "").match(/FB_PUBLIC_LOAD_DATA_\s*=\s*(.*?);/s);
+    if (match && match[1]) {
+      try {
+        const data = JSON.parse(match[1]);
+        if (data && data[1] && data[1][1]) {
+          data[1][1].forEach((item) => {
+            if (item && item[4] && item[4][0] && item[4][0][0]) {
+              const id = String(item[4][0][0]);
+              if (!seen.has(id)) {
+                seen.add(id);
+                questions.push({
+                  id,
+                  type: "TEXT",
+                  question: item[1] || `Question ${id}`
+                });
+              }
+            }
+          });
+        }
+      } catch (e) {}
+    }
+  });
+
+  return questions;
+}
+
 function extractFormData() {
   if (!isGoogleFormPage()) {
     return { ok: false, error: "FORM_PARSE_ERROR", details: { code: "NOT_GOOGLE_FORM" } };
@@ -296,7 +327,9 @@ function extractFormData() {
   }
 
   if (!questions.length) {
-    const fallbackQuestions = extractQuestionsFromEntriesFallback();
+    let fallbackQuestions = extractQuestionsFromEntriesFallback();
+    if (!fallbackQuestions.length) fallbackQuestions = extractQuestionsFromDataParamsFallback();
+
     if (!fallbackQuestions.length) {
       const entryLikeFields = document.querySelectorAll('[name^="entry."]').length;
       return {
