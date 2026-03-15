@@ -133,10 +133,9 @@ async function createTransaction(databases, userId, amount, type) {
     transactionsTableId,
     sdk.ID.unique(),
     {
-      userId,
-      amount,
-      type,
-      timestamp: new Date().toISOString()
+      userId: String(userId),
+      amount: String(amount),
+      type: String(type)
     },
     ownerPermissions(userId)
   );
@@ -158,7 +157,7 @@ async function enforceRateLimit(databases, userId) {
   const recent = await databases.listDocuments(databaseId, transactionsTableId, [
     sdk.Query.equal("userId", userId),
     sdk.Query.equal("type", "use"),
-    sdk.Query.greaterThanEqual("timestamp", windowStart),
+    sdk.Query.greaterThanEqual("$createdAt", windowStart),
     sdk.Query.limit(maxPerWindow)
   ]);
 
