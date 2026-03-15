@@ -1,5 +1,5 @@
 const sdk = require("node-appwrite");
-
+// This is a sample function that demonstrates how to solve a Google Form using an AI model (like OpenAI's GPT) and manage user credits in Appwrite. It includes error handling and rate limiting.
 const ERROR_CODES = {
   NO_CREDITS: "NO_CREDITS",
   FORM_PARSE_ERROR: "FORM_PARSE_ERROR",

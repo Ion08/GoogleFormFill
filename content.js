@@ -513,4 +513,4 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
   sendResponse({ ok: false, error: "UNKNOWN_ACTION" });
   return true;
-});
+}); 
