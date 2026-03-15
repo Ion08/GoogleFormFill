@@ -471,20 +471,39 @@ async function createTransaction(databases, userId, amount, type) {
   const databaseId = getEnv("APPWRITE_DATABASE_ID");
   const transactionsTableId = getTransactionsTableId();
 
-  return databases.createDocument(
-    databaseId,
-    transactionsTableId,
-    sdk.ID.unique(),
-    {
-      userId: String(userId),
-      // FIX #7: Store amount as a number, not a string, so queries and
-      // aggregations on the transactions collection work correctly.
-      amount: Number(amount),
-      type: String(type),
-      timestamp: new Date().toISOString()
-    },
-    ownerPermissions(userId)
-  );
+  const amountString = String(amount);
+  const amountNumber = Number(amount);
+  const configuredAmountType = String(getEnv("APPWRITE_TRANSACTIONS_AMOUNT_TYPE", "string")).toLowerCase();
+  const amountCandidates = configuredAmountType === "integer"
+    ? [amountNumber, amountString]
+    : [amountString, amountNumber];
+
+  let lastError;
+  for (const amountValue of amountCandidates) {
+    try {
+      return await databases.createDocument(
+        databaseId,
+        transactionsTableId,
+        sdk.ID.unique(),
+        {
+          userId: String(userId),
+          amount: amountValue,
+          type: String(type),
+          timestamp: new Date().toISOString()
+        },
+        ownerPermissions(userId)
+      );
+    } catch (err) {
+      lastError = err;
+      const message = String(err?.message || "").toLowerCase();
+      const typeError = message.includes("attribute \"amount\" has invalid type") || message.includes("invalid document structure");
+      if (!typeError) {
+        throw err;
+      }
+    }
+  }
+
+  throw lastError || new Error("TRANSACTION_CREATE_FAILED");
 }
 
 async function enforceRateLimit(databases, userId) {
