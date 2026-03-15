@@ -324,6 +324,15 @@ async function fetchOpenRouterWithTimeout(url, options, timeoutMs) {
   }
 }
 
+async function readResponseTextWithTimeout(response, timeoutMs) {
+  const readPromise = response.text();
+  const timeoutPromise = new Promise((_, reject) => {
+    setTimeout(() => reject(new Error(`OPENROUTER_BODY_TIMEOUT_${timeoutMs}`)), timeoutMs);
+  });
+
+  return Promise.race([readPromise, timeoutPromise]);
+}
+
 function createJwtAccountClient(jwt) {
   const endpoint = getEnv("APPWRITE_ENDPOINT", "https://fra.cloud.appwrite.io/v1");
   const projectId = getEnv("APPWRITE_PROJECT_ID");
@@ -497,24 +506,56 @@ async function callOpenRouter(questions, formTitle, trace = () => {}) {
       });
 
       if (!response.ok) {
+        trace("openrouter.attempt.error_body.read.start", {
+          attempt: attempt + 1
+        });
         let providerMessage = "";
         try {
-          const errBody = await response.json();
+          const rawBody = await readResponseTextWithTimeout(response, timeoutMs);
+          const errBody = JSON.parse(rawBody || "{}");
           providerMessage = errBody?.error?.message || errBody?.message || "";
+          trace("openrouter.attempt.error_body.read.done", {
+            attempt: attempt + 1,
+            bodyLength: String(rawBody || "").length
+          });
         } catch {
-          // ignore parse issues
+          trace("openrouter.attempt.error_body.read.failed", {
+            attempt: attempt + 1
+          });
         }
 
         const codePrefix = isRetryableStatus(response.status) ? "OPENROUTER_RETRYABLE_HTTP_" : "OPENROUTER_HTTP_";
         throw new Error(`${codePrefix}${response.status}${providerMessage ? `:${providerMessage}` : ""}`);
       }
 
-      const payload = await response.json();
+      trace("openrouter.attempt.body.read.start", {
+        attempt: attempt + 1
+      });
+      const rawBody = await readResponseTextWithTimeout(response, timeoutMs);
+      trace("openrouter.attempt.body.read.done", {
+        attempt: attempt + 1,
+        elapsedMs: Date.now() - attemptStartedAt,
+        bodyLength: String(rawBody || "").length
+      });
+
+      let payload;
+      try {
+        payload = JSON.parse(rawBody || "{}");
+      } catch {
+        throw new Error("OPENROUTER_INVALID_PAYLOAD_JSON");
+      }
+
       const content = payload.choices?.[0]?.message?.content;
 
       if (!content) {
         throw new Error("OPENROUTER_EMPTY_CONTENT");
       }
+
+      trace("openrouter.attempt.content.received", {
+        attempt: attempt + 1,
+        contentLength: String(content).length,
+        contentPreview: String(content).slice(0, 120)
+      });
 
       try {
         trace("openrouter.attempt.success", {
