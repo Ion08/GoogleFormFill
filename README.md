@@ -7,6 +7,11 @@ Production-oriented MVP Chrome extension (Manifest V3) with Appwrite auth + cred
 - Google OAuth login via Appwrite
 - Credits system stored in Appwrite
 - Solve flow: parse Google Form -> backend solveForm -> auto-fill answers
+- Supports common Google Form inputs: short answer, paragraph, multiple choice, checkboxes, and dropdowns
+- Detects several unsupported formats such as file upload, date/time, and grid questions and reports them as skipped
+- Includes question image URLs and alt text in the AI request so image-based prompts can be interpreted when the provider can access them
+- Automatically skips prompts that look like personal or sensitive data requests
+- Popup report shows which questions were answered, which were skipped, the reason for each skip, and a short explanation for every AI-generated answer
 - Error handling: `NO_CREDITS`, `FORM_PARSE_ERROR`, `AI_ERROR`, `RATE_LIMITED`
 - Rate limit logic implemented but disabled by default (`RATE_LIMIT_ENABLED=false`)
 
@@ -68,14 +73,17 @@ Use these project details:
 ## Solve Flow
 
 1. User logs in with Google from popup.
-2. On Solve Form click, extension extracts structured questions from current Google Form.
+2. On Solve Form click, the content script extracts structured questions, supported input types, options, and question images from the current Google Form.
 3. Background calls Appwrite function `solveForm`.
-4. Function validates auth, checks credits, applies optional rate limit, calls OpenRouter.
-5. Extension receives answer JSON and fills inputs.
+4. Function validates auth, checks credits, applies optional rate limit, locally skips personal-data prompts and unsupported types, then calls OpenRouter for the remaining questions.
+5. Extension fills only questions marked as answered and keeps the rest as skipped.
+6. Popup renders a per-question report with status, skip reason, confidence, answer, and explanation.
 
 ## Notes
 
 - OpenRouter key is backend-only (never in extension).
 - `RATE_LIMIT_ENABLED=false` keeps rate limiting code inactive until you turn it on.
 - MVP includes manual/admin top-up by editing `users.credits` and writing `transactions` records with type `purchase`.
+- Image-based solving depends on the model and whether the question image URL is reachable from the AI provider.
+
 # GoogleFormFill

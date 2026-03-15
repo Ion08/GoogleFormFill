@@ -8,6 +8,29 @@ const ERROR_CODES = {
   RATE_LIMITED: "RATE_LIMITED"
 };
 
+const SUPPORTED_SOLVE_TYPES = new Set([
+  "SHORT_ANSWER",
+  "PARAGRAPH",
+  "MULTIPLE_CHOICE",
+  "CHECKBOX",
+  "DROPDOWN"
+]);
+
+const LOW_CONFIDENCE_THRESHOLD = 0.55;
+const MAX_IMAGE_COUNT_PER_QUESTION = 3;
+const SENSITIVE_PATTERNS = [
+  /\b(full\s+name|first\s+name|last\s+name|your\s+name|student\s+name)\b/i,
+  /\b(email|e-mail|gmail)\b/i,
+  /\b(phone|mobile|telephone|whatsapp|contact\s+number)\b/i,
+  /\b(address|street|city|zip|postal\s+code|country)\b/i,
+  /\b(date\s+of\s+birth|birthdate|birthday|age)\b/i,
+  /\b(student\s*id|school\s*id|national\s*id|passport|ssn|social\s+security)\b/i,
+  /\bcredit\s+card|debit\s+card|iban|bank\s+account|cvv\b/i,
+  /\bpassword|passcode|pin\b/i,
+  /\bsignature\b/i,
+  /\bpersonal\s+information|personal\s+data|private\s+information\b/i
+];
+
 function getEnv(name, fallback = "") {
   return process.env[name] || fallback;
 }
@@ -56,6 +79,226 @@ function createAdminClients() {
 
   return {
     databases: new sdk.Databases(client)
+  };
+}
+
+function clampConfidence(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+
+  if (numeric < 0) return 0;
+  if (numeric > 1) return 1;
+  return numeric;
+}
+
+function cleanText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeQuestion(question, index) {
+  return {
+    id: String(question?.id || `question-${index + 1}`),
+    type: String(question?.type || "UNSUPPORTED"),
+    question: cleanText(question?.question || `Question ${index + 1}`),
+    description: cleanText(question?.description || ""),
+    options: Array.isArray(question?.options) ? question.options.map((option) => cleanText(option)).filter(Boolean) : [],
+    images: Array.isArray(question?.images)
+      ? question.images
+          .map((image) => ({
+            url: cleanText(image?.url || ""),
+            alt: cleanText(image?.alt || "")
+          }))
+          .filter((image) => image.url)
+          .slice(0, MAX_IMAGE_COUNT_PER_QUESTION)
+      : [],
+    required: Boolean(question?.required),
+    supported: Boolean(question?.supported) && SUPPORTED_SOLVE_TYPES.has(String(question?.type || ""))
+  };
+}
+
+function matchesSensitivePattern(question) {
+  const haystack = [question.question, question.description, question.options.join(" ")].filter(Boolean).join(" ");
+  return SENSITIVE_PATTERNS.some((pattern) => pattern.test(haystack));
+}
+
+function getLocalSkipReason(question) {
+  if (matchesSensitivePattern(question)) {
+    return "requires_personal_data";
+  }
+
+  if (!SUPPORTED_SOLVE_TYPES.has(question.type) || !question.supported) {
+    return "unsupported_question_type";
+  }
+
+  return null;
+}
+
+function humanizeReason(code) {
+  const labels = {
+    answered: "Answered",
+    requires_personal_data: "Requires personal data",
+    unsupported_question_type: "Unsupported question type",
+    unclear_image: "Unclear image",
+    low_ai_confidence: "Low AI confidence",
+    insufficient_context: "Insufficient context",
+    invalid_answer_shape: "Invalid answer shape",
+    answer_not_returned: "No answer returned",
+    fill_failed: "Could not fill answer"
+  };
+
+  return labels[code] || code || "Unknown";
+}
+
+function buildSkippedResult(question, reason, explanation) {
+  return {
+    id: question.id,
+    type: question.type,
+    question: question.question,
+    status: "skipped",
+    skipReason: reason,
+    reasonLabel: humanizeReason(reason),
+    explanation: explanation || humanizeReason(reason),
+    confidence: null,
+    answer: null
+  };
+}
+
+function normalizeAnswerForType(question, rawAnswer) {
+  if (question.type === "CHECKBOX") {
+    if (Array.isArray(rawAnswer)) {
+      return rawAnswer.map((item) => cleanText(item)).filter(Boolean);
+    }
+
+    if (typeof rawAnswer === "string") {
+      return rawAnswer
+        .split(/,|\n/)
+        .map((item) => cleanText(item))
+        .filter(Boolean);
+    }
+
+    return [];
+  }
+
+  if (Array.isArray(rawAnswer)) {
+    return cleanText(rawAnswer[0] || "");
+  }
+
+  return cleanText(rawAnswer || "");
+}
+
+function buildPromptText(formTitle, questions) {
+  const lines = [
+    "You are solving a Google Form for the current user.",
+    "Only answer academic or general knowledge questions.",
+    "Skip any question that asks for personal, identifying, or sensitive information.",
+    "If an image is required to answer but is unclear, skip it with reason 'unclear_image'.",
+    "If you are uncertain, skip it with reason 'low_ai_confidence'.",
+    "Return only valid JSON with this exact shape:",
+    '{"questions":{"<id>":{"status":"answered|skipped","answer":"string or array for checkbox","reason":"answered|requires_personal_data|unsupported_question_type|unclear_image|low_ai_confidence|insufficient_context","explanation":"short reasoning","confidence":0.0}}}',
+    "Confidence must be between 0 and 1.",
+    "Form title: " + (formTitle || "Untitled Form"),
+    "Questions:"
+  ];
+
+  questions.forEach((question, index) => {
+    lines.push(`Question ${index + 1}`);
+    lines.push(`id: ${question.id}`);
+    lines.push(`type: ${question.type}`);
+    lines.push(`prompt: ${question.question}`);
+    if (question.description) {
+      lines.push(`description: ${question.description}`);
+    }
+    if (question.options.length) {
+      lines.push(`options: ${question.options.join(" | ")}`);
+    }
+    if (question.images.length) {
+      lines.push(`image_count: ${question.images.length}`);
+      question.images.forEach((image, imageIndex) => {
+        if (image.alt) {
+          lines.push(`image_${imageIndex + 1}_alt: ${image.alt}`);
+        }
+      });
+    }
+    lines.push("");
+  });
+
+  return lines.join("\n");
+}
+
+function buildMultimodalMessage(formTitle, questions) {
+  const content = [{ type: "text", text: buildPromptText(formTitle, questions) }];
+
+  questions.forEach((question) => {
+    question.images.forEach((image) => {
+      content.push({
+        type: "image_url",
+        image_url: {
+          url: image.url
+        }
+      });
+    });
+  });
+
+  return content;
+}
+
+function extractQuestionPayload(rawPayload) {
+  if (rawPayload && typeof rawPayload === "object" && rawPayload.questions && typeof rawPayload.questions === "object") {
+    return rawPayload.questions;
+  }
+
+  if (rawPayload && typeof rawPayload === "object") {
+    return rawPayload;
+  }
+
+  return {};
+}
+
+function coerceAiResult(question, aiResult) {
+  if (!aiResult || typeof aiResult !== "object") {
+    return buildSkippedResult(question, "answer_not_returned", "The AI did not return a usable answer for this question.");
+  }
+
+  const confidence = clampConfidence(aiResult.confidence);
+  const requestedStatus = aiResult.status === "answered" ? "answered" : "skipped";
+  const requestedReason = cleanText(aiResult.reason || (requestedStatus === "answered" ? "answered" : "insufficient_context"));
+  const explanation = cleanText(aiResult.explanation || "");
+
+  if (requestedStatus === "skipped") {
+    return buildSkippedResult(question, requestedReason, explanation || humanizeReason(requestedReason));
+  }
+
+  const normalizedAnswer = normalizeAnswerForType(question, aiResult.answer);
+  const missingAnswer = question.type === "CHECKBOX" ? normalizedAnswer.length === 0 : !normalizedAnswer;
+
+  if (missingAnswer) {
+    return buildSkippedResult(question, "invalid_answer_shape", explanation || "The AI response did not match the expected answer format.");
+  }
+
+  if (confidence !== null && confidence < LOW_CONFIDENCE_THRESHOLD) {
+    return buildSkippedResult(question, "low_ai_confidence", explanation || "The AI marked this answer as low confidence.");
+  }
+
+  return {
+    id: question.id,
+    type: question.type,
+    question: question.question,
+    status: "answered",
+    skipReason: null,
+    reasonLabel: humanizeReason("answered"),
+    explanation: explanation || "Answer generated from the question text and available options.",
+    confidence,
+    answer: normalizedAnswer
+  };
+}
+
+function summarizeResults(results) {
+  return {
+    total: results.length,
+    answered: results.filter((item) => item.status === "answered").length,
+    skipped: results.filter((item) => item.status === "skipped").length
   };
 }
 
@@ -177,19 +420,6 @@ async function callOpenRouter(questions, formTitle) {
     throw new Error("OPENROUTER_API_KEY_MISSING");
   }
 
-  const prompt = [
-    "You are an IT homework solving assistant.",
-    "Answer the questions accurately and concisely.",
-    "Return ONLY JSON.",
-    "Keys must be the question id.",
-    "For checkbox questions, values must be arrays.",
-    "Do not add markdown or explanations.",
-    "",
-    `Form title: ${formTitle || "Untitled Form"}`,
-    "Questions:",
-    JSON.stringify(questions)
-  ].join("\n");
-
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -201,8 +431,14 @@ async function callOpenRouter(questions, formTitle) {
       model,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: "Return only valid JSON where keys are question ids." },
-        { role: "user", content: prompt }
+        {
+          role: "system",
+          content: "Return only valid JSON. Solve common Google Form question types, skip personal-data prompts, and provide short explanations."
+        },
+        {
+          role: "user",
+          content: buildMultimodalMessage(formTitle, questions)
+        }
       ],
       temperature: 0.2
     })
@@ -228,7 +464,7 @@ async function callOpenRouter(questions, formTitle) {
   }
 
   try {
-    return JSON.parse(content);
+    return extractQuestionPayload(JSON.parse(content));
   } catch {
     throw new Error("OPENROUTER_INVALID_JSON");
   }
@@ -272,14 +508,39 @@ module.exports = async ({ req, res, log, error }) => {
       return json(res, 402, { ok: false, error: ERROR_CODES.NO_CREDITS });
     }
 
-    const answers = await callOpenRouter(questions, formTitle);
+    const normalizedQuestions = questions.map(normalizeQuestion);
+    const localResults = new Map();
+    const eligibleQuestions = [];
+
+    normalizedQuestions.forEach((question) => {
+      const localSkipReason = getLocalSkipReason(question);
+      if (localSkipReason) {
+        const explanation = localSkipReason === "requires_personal_data"
+          ? "This question appears to request personal or sensitive information, so it was intentionally left unanswered."
+          : "This Google Forms input format is not supported by the current autofill workflow.";
+        localResults.set(question.id, buildSkippedResult(question, localSkipReason, explanation));
+        return;
+      }
+
+      eligibleQuestions.push(question);
+    });
+
+    const aiPayload = eligibleQuestions.length ? await callOpenRouter(eligibleQuestions, formTitle) : {};
+    const results = normalizedQuestions.map((question) => {
+      if (localResults.has(question.id)) {
+        return localResults.get(question.id);
+      }
+
+      return coerceAiResult(question, aiPayload[question.id]);
+    });
 
     const updatedUser = await updateCredits(databases, userRow, -1);
     await createTransaction(databases, userId, 1, "use");
 
     return json(res, 200, {
       ok: true,
-      answers,
+      results,
+      summary: summarizeResults(results),
       creditsLeft: Number(updatedUser.credits || 0),
       rateLimit: {
         enabled: rate.enforced

@@ -2,7 +2,8 @@ const state = {
   authenticated: false,
   session: null,
   credits: 0,
-  sdkReady: false
+  sdkReady: false,
+  lastReport: null
 };
 
 const ui = {
@@ -11,6 +12,9 @@ const ui = {
   email: document.getElementById("email"),
   credits: document.getElementById("credits"),
   status: document.getElementById("status"),
+  reportPanel: document.getElementById("reportPanel"),
+  reportSummary: document.getElementById("reportSummary"),
+  reportList: document.getElementById("reportList"),
   loginBtn: document.getElementById("loginBtn"),
   solveBtn: document.getElementById("solveBtn"),
   refreshBtn: document.getElementById("refreshBtn"),
@@ -34,6 +38,62 @@ function render() {
 
   ui.email.textContent = state.session?.email || "Unknown";
   ui.credits.textContent = String(state.credits ?? 0);
+  renderReport();
+}
+
+function formatConfidence(value) {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "n/a";
+  }
+
+  return `${Math.round(value * 100)}%`;
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderReport() {
+  const report = state.lastReport;
+
+  if (!report?.results?.length) {
+    ui.reportPanel.classList.add("hidden");
+    ui.reportSummary.textContent = "No solve report yet.";
+    ui.reportList.innerHTML = "";
+    return;
+  }
+
+  ui.reportPanel.classList.remove("hidden");
+  ui.reportSummary.textContent = `${report.summary.answered} answered, ${report.summary.skipped} skipped, ${report.summary.filled} filled into the form.`;
+
+  ui.reportList.innerHTML = report.results.map((item, index) => {
+    const answerText = Array.isArray(item.answer) ? item.answer.join(", ") : item.answer;
+    const answerMarkup = item.status === "answered"
+      ? `<p><strong>Answer:</strong> ${escapeHtml(answerText || "-")}</p>`
+      : "";
+    const reason = item.status === "skipped" ? item.reasonLabel || item.skipReason || "Skipped" : "Completed";
+    const confidence = item.status === "answered" ? `<p><strong>Confidence:</strong> ${escapeHtml(formatConfidence(item.confidence))}</p>` : "";
+
+    return `
+      <article class="report-item ${item.status === "answered" ? "report-item-success" : "report-item-skipped"}">
+        <div class="report-item-head">
+          <span class="report-index">Q${index + 1}</span>
+          <span class="report-badge ${item.status === "answered" ? "report-badge-success" : "report-badge-skipped"}">${escapeHtml(item.status === "answered" ? "Answered" : "Skipped")}</span>
+        </div>
+        <h3>${escapeHtml(item.question || item.id)}</h3>
+        <p><strong>Type:</strong> ${escapeHtml(item.type || "Unknown")}</p>
+        <p><strong>Reason:</strong> ${escapeHtml(reason)}</p>
+        ${answerMarkup}
+        ${confidence}
+        <p><strong>Why:</strong> ${escapeHtml(item.explanation || "No explanation provided.")}</p>
+      </article>
+    `;
+  }).join("");
 }
 
 function sendMessage(action, payload = {}) {
@@ -171,6 +231,7 @@ async function logout() {
   state.session = null;
   state.credits = 0;
   state.sdkReady = false;
+  state.lastReport = null;
   setStatus("Logged out.", "info");
   render();
 }
@@ -204,8 +265,17 @@ async function solveForm() {
       state.credits = response.creditsLeft;
     }
 
+    state.lastReport = response.report || null;
+
     render();
-    setStatus(`Solved and filled ${response.filled || 0} question(s).`, "success");
+    if (response.report?.summary) {
+      setStatus(
+        `Answered ${response.report.summary.answered}, skipped ${response.report.summary.skipped}, filled ${response.report.summary.filled}.`,
+        "success"
+      );
+    } else {
+      setStatus(`Solved and filled ${response.filled || 0} question(s).`, "success");
+    }
   } catch (err) {
     setStatus(mapErrorToMessage(err.message), "error");
   } finally {

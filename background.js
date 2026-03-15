@@ -187,6 +187,68 @@ async function executeSolveFunction(config, session, payload) {
   return responseBody;
 }
 
+function humanizeReportReason(code) {
+  const labels = {
+    answered: "Answered",
+    requires_personal_data: "Requires personal data",
+    unsupported_question_type: "Unsupported question type",
+    unclear_image: "Unclear image",
+    low_ai_confidence: "Low AI confidence",
+    insufficient_context: "Insufficient context",
+    invalid_answer_shape: "Invalid answer shape",
+    answer_not_returned: "No answer returned",
+    field_not_found: "Form field not found",
+    option_not_found: "Matching option not found",
+    fill_failed: "Could not fill answer"
+  };
+
+  return labels[code] || code || "Unknown";
+}
+
+function mergeSolveAndFillResults(solveResults, fillResults) {
+  const fillById = new Map((fillResults || []).map((item) => [String(item.id), item]));
+
+  const results = (solveResults || []).map((item) => {
+    const fill = fillById.get(String(item.id));
+
+    if (!fill || item.status !== "answered") {
+      return {
+        ...item,
+        fillStatus: item.status === "answered" ? "not_attempted" : "skipped"
+      };
+    }
+
+    if (fill.status === "filled") {
+      return {
+        ...item,
+        fillStatus: "filled"
+      };
+    }
+
+    const reason = fill.reason || "fill_failed";
+    return {
+      ...item,
+      status: "skipped",
+      skipReason: reason,
+      reasonLabel: humanizeReportReason(reason),
+      explanation: item.explanation
+        ? `${item.explanation} The extension could not place this answer into the form: ${humanizeReportReason(reason)}.`
+        : `The extension could not place this answer into the form: ${humanizeReportReason(reason)}.`,
+      fillStatus: "skipped"
+    };
+  });
+
+  return {
+    results,
+    summary: {
+      total: results.length,
+      answered: results.filter((item) => item.status === "answered").length,
+      skipped: results.filter((item) => item.status === "skipped").length,
+      filled: results.filter((item) => item.fillStatus === "filled").length
+    }
+  };
+}
+
 async function getActiveFormTab() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const tab = tabs?.[0];
@@ -394,17 +456,20 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
 
         const fillResult = await sendMessageToFormTab(tab.id, {
           action: "FILL_FORM",
-          answers: solve.answers
+          results: solve.results || []
         });
 
         if (!fillResult?.ok) {
           return { ok: false, error: "FORM_PARSE_ERROR" };
         }
 
+        const report = mergeSolveAndFillResults(solve.results || [], fillResult.results || []);
+
         return {
           ok: true,
-          filled: fillResult.filled,
-          creditsLeft: solve.creditsLeft
+          filled: report.summary.filled,
+          creditsLeft: solve.creditsLeft,
+          report
         };
       });
 

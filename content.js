@@ -3,7 +3,11 @@ function isGoogleFormPage() {
 }
 
 function cleanText(value) {
-  return (value || "").replace(/\s+/g, " ").trim();
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function normalizeForMatch(value) {
+  return cleanText(value).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 }
 
 function findQuestionTitle(block) {
@@ -24,11 +28,32 @@ function findQuestionTitle(block) {
   return "";
 }
 
+function findQuestionDescription(block, title) {
+  const selectors = [
+    '.gubaDc',
+    '.RgANM',
+    '.freebirdFormviewerComponentsQuestionBaseDescription',
+    '[role="note"]'
+  ];
+
+  for (const selector of selectors) {
+    const nodes = Array.from(block.querySelectorAll(selector));
+    for (const node of nodes) {
+      const text = cleanText(node.textContent || "");
+      if (text && text !== title) {
+        return text;
+      }
+    }
+  }
+
+  return "";
+}
+
 function extractOptions(block) {
   const options = [];
+  const candidates = block.querySelectorAll('label, [role="option"], .nWQGrd, [role="radio"], [role="checkbox"]');
 
-  const labels = block.querySelectorAll('label, [role="option"], .nWQGrd');
-  labels.forEach((label) => {
+  candidates.forEach((label) => {
     const text = cleanText(label.textContent || "");
     if (text && !options.includes(text)) {
       options.push(text);
@@ -38,13 +63,57 @@ function extractOptions(block) {
   return options;
 }
 
+function extractQuestionImages(block) {
+  const images = [];
+  const seen = new Set();
+
+  Array.from(block.querySelectorAll("img")).forEach((img) => {
+    const url = img.currentSrc || img.src || "";
+    const alt = cleanText(img.alt || "");
+    const width = Number(img.naturalWidth || img.width || 0);
+    const height = Number(img.naturalHeight || img.height || 0);
+
+    if (!url || seen.has(url)) return;
+    if (!width && !height && !alt) return;
+
+    seen.add(url);
+    images.push({ url, alt, width, height });
+  });
+
+  return images;
+}
+
+function hasGridLayout(block) {
+  return Boolean(block.querySelector('table, [role="grid"], [role="group"] table'));
+}
+
 function detectQuestionType(block) {
-  if (block.querySelector('input[type="radio"]')) return "MULTIPLE_CHOICE";
-  if (block.querySelector('input[type="checkbox"]')) return "CHECKBOX";
+  const text = cleanText(block.textContent || "");
+
+  if (block.querySelector('input[type="file"]') || /upload files?/i.test(text)) return "FILE_UPLOAD";
+  if (block.querySelector('input[type="date"]')) return "DATE";
+  if (block.querySelector('input[type="time"]')) return "TIME";
+
+  if (block.querySelector('input[type="radio"]')) {
+    return hasGridLayout(block) ? "MULTIPLE_CHOICE_GRID" : "MULTIPLE_CHOICE";
+  }
+
+  if (block.querySelector('input[type="checkbox"]')) {
+    return hasGridLayout(block) ? "CHECKBOX_GRID" : "CHECKBOX";
+  }
+
   if (block.querySelector("select") || block.querySelector('[role="listbox"]')) return "DROPDOWN";
   if (block.querySelector("textarea")) return "PARAGRAPH";
   if (block.querySelector('input[type="text"], input[type="email"], input:not([type])')) return "SHORT_ANSWER";
-  return null;
+
+  return "UNSUPPORTED";
+}
+
+function hasQuestionSignal(block) {
+  return Boolean(
+    block.querySelector('input, textarea, select, [role="radio"], [role="checkbox"], [role="listbox"], table') ||
+    /upload files?/i.test(cleanText(block.textContent || ""))
+  );
 }
 
 function extractEntryIdFromText(text) {
@@ -54,24 +123,24 @@ function extractEntryIdFromText(text) {
 
 function extractNumericQuestionIdFromDataParams(text) {
   const source = String(text || "");
-  // Typical pattern in Google Forms question blocks: [[641627248,null,true,...]]
   const nested = source.match(/\[\[(\d+),\s*null,\s*true/);
   if (nested) {
     return nested[1];
   }
 
-  // Fallback to first large integer in data-params payload.
   const generic = source.match(/\b(\d{6,})\b/);
   return generic ? generic[1] : null;
 }
 
-function findEntryId(block, type) {
+function findEntryId(block, type, fallbackId) {
   const queryByType = {
     SHORT_ANSWER: 'input[name^="entry."]',
     PARAGRAPH: 'textarea[name^="entry."]',
     MULTIPLE_CHOICE: 'input[type="radio"][name^="entry."]',
     CHECKBOX: 'input[type="checkbox"][name^="entry."]',
-    DROPDOWN: 'select[name^="entry."], [name^="entry."]'
+    DROPDOWN: 'select[name^="entry."], [name^="entry."]',
+    DATE: 'input[type="date"][name^="entry."]',
+    TIME: 'input[type="time"][name^="entry."]'
   };
 
   const input = block.querySelector(queryByType[type] || '[name^="entry."]');
@@ -79,7 +148,6 @@ function findEntryId(block, type) {
     return input.name;
   }
 
-  // Newer Forms layouts often store ids in attributes such as data-params.
   const attrCandidates = [
     block.getAttribute("data-params"),
     block.getAttribute("jsdata"),
@@ -116,7 +184,7 @@ function findEntryId(block, type) {
     }
   }
 
-  return extractEntryIdFromText(block.outerHTML) || extractNumericQuestionIdFromDataParams(block.outerHTML);
+  return extractEntryIdFromText(block.outerHTML) || extractNumericQuestionIdFromDataParams(block.outerHTML) || fallbackId;
 }
 
 function findQuestionContainer(element) {
@@ -161,8 +229,7 @@ function optionTextForInput(input) {
     }
   }
 
-  const wrapperText = cleanText(input.parentElement?.textContent || "");
-  return wrapperText;
+  return cleanText(input.parentElement?.textContent || "");
 }
 
 function extractQuestionsFromEntriesFallback() {
@@ -180,7 +247,12 @@ function extractQuestionsFromEntriesFallback() {
     byId.set(id, {
       id,
       type,
-      question: getQuestionTextForElement(el, id)
+      question: getQuestionTextForElement(el, id),
+      description: "",
+      options: [],
+      images: [],
+      required: false,
+      supported: true
     });
   });
 
@@ -195,17 +267,16 @@ function extractQuestionsFromEntriesFallback() {
 
   for (const [id, group] of radioGroups.entries()) {
     if (!id || byId.has(id)) continue;
-    const options = [];
-    group.forEach((radio) => {
-      const text = optionTextForInput(radio);
-      if (text && !options.includes(text)) options.push(text);
-    });
 
     byId.set(id, {
       id,
       type: "MULTIPLE_CHOICE",
       question: getQuestionTextForElement(group[0], id),
-      options
+      description: "",
+      options: group.map(optionTextForInput).filter(Boolean),
+      images: [],
+      required: false,
+      supported: true
     });
   }
 
@@ -220,17 +291,16 @@ function extractQuestionsFromEntriesFallback() {
 
   for (const [id, group] of checkGroups.entries()) {
     if (!id || byId.has(id)) continue;
-    const options = [];
-    group.forEach((box) => {
-      const text = optionTextForInput(box);
-      if (text && !options.includes(text)) options.push(text);
-    });
 
     byId.set(id, {
       id,
       type: "CHECKBOX",
       question: getQuestionTextForElement(group[0], id),
-      options
+      description: "",
+      options: group.map(optionTextForInput).filter(Boolean),
+      images: [],
+      required: false,
+      supported: true
     });
   }
 
@@ -247,7 +317,11 @@ function extractQuestionsFromEntriesFallback() {
       id,
       type: "DROPDOWN",
       question: getQuestionTextForElement(select, id),
-      options
+      description: "",
+      options,
+      images: [],
+      required: false,
+      supported: true
     });
   });
 
@@ -260,29 +334,64 @@ function extractQuestionsFromDataParamsFallback() {
 
   Array.from(document.querySelectorAll("script")).forEach((script) => {
     const match = (script.textContent || "").match(/FB_PUBLIC_LOAD_DATA_\s*=\s*(.*?);/s);
-    if (match && match[1]) {
-      try {
-        const data = JSON.parse(match[1]);
-        if (data && data[1] && data[1][1]) {
-          data[1][1].forEach((item) => {
-            if (item && item[4] && item[4][0] && item[4][0][0]) {
-              const id = String(item[4][0][0]);
-              if (!seen.has(id)) {
-                seen.add(id);
-                questions.push({
-                  id,
-                  type: "TEXT",
-                  question: item[1] || `Question ${id}`
-                });
-              }
+    if (!match?.[1]) {
+      return;
+    }
+
+    try {
+      const data = JSON.parse(match[1]);
+      if (data && data[1] && data[1][1]) {
+        data[1][1].forEach((item, index) => {
+          if (item && item[4] && item[4][0] && item[4][0][0]) {
+            const id = String(item[4][0][0]);
+            if (!seen.has(id)) {
+              seen.add(id);
+              questions.push({
+                id,
+                type: "SHORT_ANSWER",
+                question: item[1] || `Question ${index + 1}`,
+                description: "",
+                options: [],
+                images: [],
+                required: false,
+                supported: true
+              });
             }
-          });
-        }
-      } catch (e) {}
+          }
+        });
+      }
+    } catch (_err) {
+      // ignore malformed embedded payloads
     }
   });
 
   return questions;
+}
+
+function buildQuestionRecord(block, index) {
+  const title = findQuestionTitle(block);
+  if (!title) {
+    return null;
+  }
+
+  const type = detectQuestionType(block);
+  if (type === "UNSUPPORTED" && !hasQuestionSignal(block)) {
+    return null;
+  }
+
+  const fallbackId = `question-${index + 1}`;
+  const id = findEntryId(block, type, fallbackId);
+
+  return {
+    id,
+    type,
+    question: title,
+    description: findQuestionDescription(block, title),
+    options: ["MULTIPLE_CHOICE", "CHECKBOX", "DROPDOWN"].includes(type) ? extractOptions(block) : [],
+    images: extractQuestionImages(block),
+    required: block.textContent?.includes("*") || Boolean(block.querySelector('[aria-label*="Required"], [data-required="true"]')),
+    supported: ["SHORT_ANSWER", "PARAGRAPH", "MULTIPLE_CHOICE", "CHECKBOX", "DROPDOWN"].includes(type)
+  };
 }
 
 function extractFormData() {
@@ -290,7 +399,6 @@ function extractFormData() {
     return { ok: false, error: "FORM_PARSE_ERROR", details: { code: "NOT_GOOGLE_FORM" } };
   }
 
-  // Builder/edit links are not fillable by the extension parser.
   if (window.location.href.includes("/edit")) {
     return { ok: false, error: "FORM_PARSE_ERROR", details: { code: "EDIT_MODE_URL" } };
   }
@@ -299,32 +407,19 @@ function extractFormData() {
     cleanText(document.querySelector('[role="heading"]')?.textContent || "") ||
     cleanText(document.title.replace(" - Google Forms", ""));
 
-  const blocks = Array.from(
-    document.querySelectorAll('[role="listitem"], .Qr7Oae, [data-params*="entry."], [jsdata*="entry."]')
-  );
+  const blocks = Array.from(document.querySelectorAll('[role="listitem"], .Qr7Oae'));
   const questions = [];
   const seen = new Set();
 
-  for (const block of blocks) {
-    const type = detectQuestionType(block);
-    if (!type) continue;
-
-    const question = findQuestionTitle(block);
-    const id = findEntryId(block, type);
-
-    if (!id || !question) continue;
-
-    if (seen.has(id)) continue;
-    seen.add(id);
-
-    const item = { id, type, question };
-
-    if (["MULTIPLE_CHOICE", "CHECKBOX", "DROPDOWN"].includes(type)) {
-      item.options = extractOptions(block);
+  blocks.forEach((block, index) => {
+    const record = buildQuestionRecord(block, index);
+    if (!record || seen.has(record.id)) {
+      return;
     }
 
-    questions.push(item);
-  }
+    seen.add(record.id);
+    questions.push(record);
+  });
 
   if (!questions.length) {
     let fallbackQuestions = extractQuestionsFromEntriesFallback();
@@ -367,17 +462,17 @@ function dispatchInputEvents(element) {
 }
 
 function textOfLabelForInput(input) {
-  const label = input.closest('label') || document.querySelector(`label[for="${input.id}"]`);
+  const label = input.closest("label") || document.querySelector(`label[for="${input.id}"]`);
   return cleanText(label?.textContent || "");
 }
 
 function fillShortAnswer(id, value) {
   const input = document.querySelector(`input[name="${CSS.escape(id)}"]`);
-  if (!input) return false;
+  if (!input) return { filled: false, reason: "field_not_found" };
   input.focus();
   input.value = String(value ?? "");
   dispatchInputEvents(input);
-  return true;
+  return { filled: true };
 }
 
 function findQuestionInputByNumericId(id) {
@@ -388,116 +483,131 @@ function findQuestionInputByNumericId(id) {
   const block = blocks.find((el) => String(el.getAttribute("data-params") || "").includes(`[[${safeId},`));
   if (!block) return null;
 
-  return block.querySelector("textarea, input[type=\"text\"], input[type=\"email\"], input:not([type])");
+  return block.querySelector('textarea, input[type="text"], input[type="email"], input:not([type])');
 }
 
 function fillTextByNumericId(id, value) {
   const el = findQuestionInputByNumericId(id);
-  if (!el) return false;
+  if (!el) return { filled: false, reason: "field_not_found" };
 
   el.focus();
   el.value = String(value ?? "");
   dispatchInputEvents(el);
-  return true;
+  return { filled: true };
 }
 
 function fillParagraph(id, value) {
   const textarea = document.querySelector(`textarea[name="${CSS.escape(id)}"]`);
-  if (!textarea) return false;
+  if (!textarea) return { filled: false, reason: "field_not_found" };
   textarea.focus();
   textarea.value = String(value ?? "");
   dispatchInputEvents(textarea);
-  return true;
+  return { filled: true };
 }
 
 function fillMultipleChoice(id, value) {
   const radios = Array.from(document.querySelectorAll(`input[type="radio"][name="${CSS.escape(id)}"]`));
-  if (!radios.length) return false;
+  if (!radios.length) return { filled: false, reason: "field_not_found" };
 
-  const target = radios.find((radio) => {
-    const labelText = textOfLabelForInput(radio);
-    return labelText.toLowerCase() === String(value || "").toLowerCase();
+  const expected = normalizeForMatch(value);
+  const target = radios.find((radio) => normalizeForMatch(textOfLabelForInput(radio)) === expected) || radios.find((radio) => {
+    const labelText = normalizeForMatch(textOfLabelForInput(radio));
+    return labelText.includes(expected) || expected.includes(labelText);
   });
 
-  (target || radios[0]).click();
-  return true;
+  if (!target) {
+    return { filled: false, reason: "option_not_found" };
+  }
+
+  target.click();
+  return { filled: true };
 }
 
 function fillCheckbox(id, values) {
-  const expected = new Set((Array.isArray(values) ? values : [values]).map((v) => String(v).toLowerCase()));
+  const expected = new Set((Array.isArray(values) ? values : [values]).map((value) => normalizeForMatch(value)).filter(Boolean));
   const boxes = Array.from(document.querySelectorAll(`input[type="checkbox"][name="${CSS.escape(id)}"]`));
-  if (!boxes.length) return false;
+  if (!boxes.length) return { filled: false, reason: "field_not_found" };
 
-  let clicked = 0;
+  const available = new Set(boxes.map((box) => normalizeForMatch(textOfLabelForInput(box))).filter(Boolean));
+  let toggled = 0;
+
   boxes.forEach((box) => {
-    const labelText = textOfLabelForInput(box).toLowerCase();
+    const labelText = normalizeForMatch(textOfLabelForInput(box));
     const shouldSelect = expected.has(labelText);
 
     if (shouldSelect !== box.checked) {
       box.click();
-      clicked += 1;
+      toggled += 1;
     }
   });
 
-  return clicked > 0 || expected.size === 0;
+  if (Array.from(expected).some((value) => !available.has(value))) {
+    return { filled: false, reason: "option_not_found" };
+  }
+
+  return { filled: toggled > 0 || expected.size > 0, reason: expected.size ? undefined : "empty_selection" };
 }
 
 function fillDropdown(id, value) {
   const select = document.querySelector(`select[name="${CSS.escape(id)}"]`);
   if (!select) {
-    return false;
+    return { filled: false, reason: "field_not_found" };
   }
 
-  const normalized = String(value || "").toLowerCase();
-  const option = Array.from(select.options).find((opt) => cleanText(opt.textContent).toLowerCase() === normalized);
+  const normalized = normalizeForMatch(value);
+  const option = Array.from(select.options).find((opt) => normalizeForMatch(opt.textContent) === normalized);
 
-  if (!option) return false;
+  if (!option) return { filled: false, reason: "option_not_found" };
 
   select.value = option.value;
   dispatchInputEvents(select);
-  return true;
+  return { filled: true };
 }
 
-function fillAnswers(answersById) {
-  if (!answersById || typeof answersById !== "object") {
+function fillQuestionResult(result) {
+  if (!result || result.status !== "answered") {
+    return {
+      id: result?.id || "unknown",
+      status: "skipped",
+      reason: result?.skipReason || result?.reason || "not_answered"
+    };
+  }
+
+  let outcome = { filled: false, reason: "unsupported_question_type" };
+
+  if (/^\d+$/.test(String(result.id || "")) && ["SHORT_ANSWER", "PARAGRAPH"].includes(result.type)) {
+    outcome = fillTextByNumericId(result.id, result.answer);
+  } else if (result.type === "SHORT_ANSWER") {
+    outcome = fillShortAnswer(result.id, result.answer);
+  } else if (result.type === "PARAGRAPH") {
+    outcome = fillParagraph(result.id, result.answer);
+  } else if (result.type === "MULTIPLE_CHOICE") {
+    outcome = fillMultipleChoice(result.id, result.answer);
+  } else if (result.type === "CHECKBOX") {
+    outcome = fillCheckbox(result.id, result.answer);
+  } else if (result.type === "DROPDOWN") {
+    outcome = fillDropdown(result.id, result.answer);
+  }
+
+  return {
+    id: result.id,
+    status: outcome.filled ? "filled" : "skipped",
+    reason: outcome.filled ? null : outcome.reason || "fill_failed"
+  };
+}
+
+function fillAnswers(results) {
+  if (!Array.isArray(results)) {
     return { ok: false, error: "FORM_PARSE_ERROR" };
   }
 
-  let filled = 0;
+  const fillResults = results.map(fillQuestionResult);
 
-  Object.entries(answersById).forEach(([id, answer]) => {
-    if (/^\d+$/.test(String(id)) && fillTextByNumericId(id, answer)) {
-      filled += 1;
-      return;
-    }
-
-    if (fillShortAnswer(id, answer)) {
-      filled += 1;
-      return;
-    }
-
-    if (fillParagraph(id, answer)) {
-      filled += 1;
-      return;
-    }
-
-    const isArrayAnswer = Array.isArray(answer);
-    if (isArrayAnswer && fillCheckbox(id, answer)) {
-      filled += 1;
-      return;
-    }
-
-    if (fillMultipleChoice(id, answer)) {
-      filled += 1;
-      return;
-    }
-
-    if (fillDropdown(id, answer)) {
-      filled += 1;
-    }
-  });
-
-  return { ok: true, filled };
+  return {
+    ok: true,
+    filled: fillResults.filter((item) => item.status === "filled").length,
+    results: fillResults
+  };
 }
 
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
@@ -507,10 +617,10 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   }
 
   if (request?.action === "FILL_FORM") {
-    sendResponse(fillAnswers(request.answers));
+    sendResponse(fillAnswers(request.results));
     return true;
   }
 
   sendResponse({ ok: false, error: "UNKNOWN_ACTION" });
   return true;
-}); 
+});

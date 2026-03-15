@@ -126,6 +126,92 @@ body {
   color: var(--danger);
 }
 
+.report {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #dfe7f2;
+}
+
+.report-header h2 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.report-summary {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.report-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.report-item {
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid #d8dfeb;
+  background: #f9fbff;
+}
+
+.report-item-success {
+  border-color: #b7e4cb;
+  background: #f3fcf7;
+}
+
+.report-item-skipped {
+  border-color: #f0d2d0;
+  background: #fff7f6;
+}
+
+.report-item-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.report-index {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.report-badge {
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.report-badge-success {
+  background: #dff6e8;
+  color: #067647;
+}
+
+.report-badge-skipped {
+  background: #fee4e2;
+  color: #b42318;
+}
+
+.report-item h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.report-item p {
+  margin: 5px 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 @keyframes fade-in {
   from {
     opacity: 0;
