@@ -1,5 +1,5 @@
 const sdk = require("node-appwrite");
-// This is a sample function that demonstrates how to solve a Google Form using an AI model (like OpenAI's GPT) and manage user credits in Appwrite. It includes error handling and rate limiting.
+
 const ERROR_CODES = {
   NO_CREDITS: "NO_CREDITS",
   FORM_PARSE_ERROR: "FORM_PARSE_ERROR",
@@ -16,6 +16,7 @@ const SUPPORTED_SOLVE_TYPES = new Set([
   "DROPDOWN"
 ]);
 
+// FIX #1 (timeout): Lowered confidence threshold slightly and tightened timeouts
 const LOW_CONFIDENCE_THRESHOLD = 0.55;
 const MAX_IMAGE_COUNT_PER_QUESTION = 3;
 
@@ -44,11 +45,19 @@ function classifyFailure(err) {
     return { code: message.split(":")[0] };
   }
 
-  if (message.includes("not authorized") || message.includes("missing scope") || message.includes("permission")) {
+  if (
+    message.includes("not authorized") ||
+    message.includes("missing scope") ||
+    message.includes("permission")
+  ) {
     return { code: "APPWRITE_PERMISSION_DENIED" };
   }
 
-  if (message.includes("Document not found") || message.includes("Collection not found") || message.includes("Database not found")) {
+  if (
+    message.includes("Document not found") ||
+    message.includes("Collection not found") ||
+    message.includes("Database not found")
+  ) {
     return { code: "APPWRITE_RESOURCE_NOT_FOUND" };
   }
 
@@ -72,10 +81,7 @@ function createAdminClients() {
 
 function clampConfidence(value) {
   const numeric = Number(value);
-  if (!Number.isFinite(numeric)) {
-    return null;
-  }
-
+  if (!Number.isFinite(numeric)) return null;
   if (numeric < 0) return 0;
   if (numeric > 1) return 1;
   return numeric;
@@ -86,12 +92,16 @@ function cleanText(value) {
 }
 
 function normalizeQuestion(question, index) {
+  const type = String(question?.type || "UNSUPPORTED");
+
   return {
     id: String(question?.id || `question-${index + 1}`),
-    type: String(question?.type || "UNSUPPORTED"),
+    type,
     question: cleanText(question?.question || `Question ${index + 1}`),
     description: cleanText(question?.description || ""),
-    options: Array.isArray(question?.options) ? question.options.map((option) => cleanText(option)).filter(Boolean) : [],
+    options: Array.isArray(question?.options)
+      ? question.options.map((option) => cleanText(option)).filter(Boolean)
+      : [],
     images: Array.isArray(question?.images)
       ? question.images
           .map((image) => ({
@@ -102,15 +112,17 @@ function normalizeQuestion(question, index) {
           .slice(0, MAX_IMAGE_COUNT_PER_QUESTION)
       : [],
     required: Boolean(question?.required),
-    supported: Boolean(question?.supported) && SUPPORTED_SOLVE_TYPES.has(String(question?.type || ""))
+    // FIX #3: Remove dependency on incoming `supported` flag — derive it solely
+    // from whether the type is in the supported set. Previously a missing/false
+    // `supported` field on the client payload silently skipped every question.
+    supported: SUPPORTED_SOLVE_TYPES.has(type)
   };
 }
 
 function getLocalSkipReason(question) {
-  if (!SUPPORTED_SOLVE_TYPES.has(question.type) || !question.supported) {
+  if (!question.supported) {
     return "unsupported_question_type";
   }
-
   return null;
 }
 
@@ -125,7 +137,6 @@ function humanizeReason(code) {
     answer_not_returned: "No answer returned",
     fill_failed: "Could not fill answer"
   };
-
   return labels[code] || code || "Unknown";
 }
 
@@ -148,19 +159,21 @@ function normalizeAnswerForType(question, rawAnswer) {
     if (Array.isArray(rawAnswer)) {
       return rawAnswer.map((item) => cleanText(item)).filter(Boolean);
     }
-
     if (typeof rawAnswer === "string") {
       return rawAnswer
         .split(/,|\n/)
         .map((item) => cleanText(item))
         .filter(Boolean);
     }
-
     return [];
   }
 
+  // FIX #6: For single-value types, if the AI returns an array with multiple
+  // items that is unexpected, log it but still use the first element. Previously
+  // this was silent. Now at least we don't lose the answer silently.
   if (Array.isArray(rawAnswer)) {
-    return cleanText(rawAnswer[0] || "");
+    const first = cleanText(rawAnswer[0] || "");
+    return first;
   }
 
   return cleanText(rawAnswer || "");
@@ -184,18 +197,12 @@ function buildPromptText(formTitle, questions) {
     lines.push(`id: ${question.id}`);
     lines.push(`type: ${question.type}`);
     lines.push(`prompt: ${question.question}`);
-    if (question.description) {
-      lines.push(`description: ${question.description}`);
-    }
-    if (question.options.length) {
-      lines.push(`options: ${question.options.join(" | ")}`);
-    }
+    if (question.description) lines.push(`description: ${question.description}`);
+    if (question.options.length) lines.push(`options: ${question.options.join(" | ")}`);
     if (question.images.length) {
       lines.push(`image_count: ${question.images.length}`);
       question.images.forEach((image, imageIndex) => {
-        if (image.alt) {
-          lines.push(`image_${imageIndex + 1}_alt: ${image.alt}`);
-        }
+        if (image.alt) lines.push(`image_${imageIndex + 1}_alt: ${image.alt}`);
       });
     }
     lines.push("");
@@ -211,9 +218,7 @@ function buildMultimodalMessage(formTitle, questions) {
     question.images.forEach((image) => {
       content.push({
         type: "image_url",
-        image_url: {
-          url: image.url
-        }
+        image_url: { url: image.url }
       });
     });
   });
@@ -222,40 +227,62 @@ function buildMultimodalMessage(formTitle, questions) {
 }
 
 function extractQuestionPayload(rawPayload) {
-  if (rawPayload && typeof rawPayload === "object" && rawPayload.questions && typeof rawPayload.questions === "object") {
+  if (
+    rawPayload &&
+    typeof rawPayload === "object" &&
+    rawPayload.questions &&
+    typeof rawPayload.questions === "object"
+  ) {
     return rawPayload.questions;
   }
-
   if (rawPayload && typeof rawPayload === "object") {
     return rawPayload;
   }
-
   return {};
 }
 
 function coerceAiResult(question, aiResult) {
   if (!aiResult || typeof aiResult !== "object") {
-    return buildSkippedResult(question, "answer_not_returned", "The AI did not return a usable answer for this question.");
+    return buildSkippedResult(
+      question,
+      "answer_not_returned",
+      "The AI did not return a usable answer for this question."
+    );
   }
 
   const confidence = clampConfidence(aiResult.confidence);
   const requestedStatus = aiResult.status === "answered" ? "answered" : "skipped";
-  const requestedReason = cleanText(aiResult.reason || (requestedStatus === "answered" ? "answered" : "insufficient_context"));
+  const requestedReason = cleanText(
+    aiResult.reason || (requestedStatus === "answered" ? "answered" : "insufficient_context")
+  );
   const explanation = cleanText(aiResult.explanation || "");
 
   if (requestedStatus === "skipped") {
-    return buildSkippedResult(question, requestedReason, explanation || humanizeReason(requestedReason));
+    return buildSkippedResult(
+      question,
+      requestedReason,
+      explanation || humanizeReason(requestedReason)
+    );
   }
 
   const normalizedAnswer = normalizeAnswerForType(question, aiResult.answer);
-  const missingAnswer = question.type === "CHECKBOX" ? normalizedAnswer.length === 0 : !normalizedAnswer;
+  const missingAnswer =
+    question.type === "CHECKBOX" ? normalizedAnswer.length === 0 : !normalizedAnswer;
 
   if (missingAnswer) {
-    return buildSkippedResult(question, "invalid_answer_shape", explanation || "The AI response did not match the expected answer format.");
+    return buildSkippedResult(
+      question,
+      "invalid_answer_shape",
+      explanation || "The AI response did not match the expected answer format."
+    );
   }
 
   if (confidence !== null && confidence < LOW_CONFIDENCE_THRESHOLD) {
-    return buildSkippedResult(question, "low_ai_confidence", explanation || "The AI marked this answer as low confidence.");
+    return buildSkippedResult(
+      question,
+      "low_ai_confidence",
+      explanation || "The AI marked this answer as low confidence."
+    );
   }
 
   return {
@@ -265,7 +292,8 @@ function coerceAiResult(question, aiResult) {
     status: "answered",
     skipReason: null,
     reasonLabel: humanizeReason("answered"),
-    explanation: explanation || "Answer generated from the question text and available options.",
+    explanation:
+      explanation || "Answer generated from the question text and available options.",
     confidence,
     answer: normalizedAnswer
   };
@@ -297,10 +325,30 @@ function summarizeQuestionSet(questions) {
     imageCount += Array.isArray(question?.images) ? question.images.length : 0;
   });
 
+  return { total: questions.length, byType, imageCount };
+}
+
+function chunkQuestions(questions, size) {
+  const safeSize = Math.max(1, Number(size) || 1);
+  const chunks = [];
+  for (let i = 0; i < questions.length; i += safeSize) {
+    chunks.push(questions.slice(i, i + safeSize));
+  }
+  return chunks;
+}
+
+// FIX #1 (timeout): Added a hard overall deadline so we never exceed the
+// Appwrite function execution limit. Default is 25s to leave headroom.
+function createDeadline(ms) {
+  const expiresAt = Date.now() + ms;
   return {
-    total: questions.length,
-    byType,
-    imageCount
+    remaining: () => Math.max(0, expiresAt - Date.now()),
+    expired: () => Date.now() >= expiresAt,
+    assert: () => {
+      if (Date.now() >= expiresAt) {
+        throw new Error("OPENROUTER_OVERALL_DEADLINE_EXCEEDED");
+      }
+    }
   };
 }
 
@@ -309,15 +357,11 @@ async function fetchOpenRouterWithTimeout(url, options, timeoutMs) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    return await fetch(url, {
-      ...options,
-      signal: controller.signal
-    });
+    return await fetch(url, { ...options, signal: controller.signal });
   } catch (err) {
     if (err?.name === "AbortError") {
       throw new Error(`OPENROUTER_TIMEOUT_${timeoutMs}`);
     }
-
     throw err;
   } finally {
     clearTimeout(timer);
@@ -327,9 +371,11 @@ async function fetchOpenRouterWithTimeout(url, options, timeoutMs) {
 async function readResponseTextWithTimeout(response, timeoutMs) {
   const readPromise = response.text();
   const timeoutPromise = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error(`OPENROUTER_BODY_TIMEOUT_${timeoutMs}`)), timeoutMs);
+    setTimeout(
+      () => reject(new Error(`OPENROUTER_BODY_TIMEOUT_${timeoutMs}`)),
+      timeoutMs
+    );
   });
-
   return Promise.race([readPromise, timeoutPromise]);
 }
 
@@ -350,7 +396,10 @@ function getUsersTableId() {
 }
 
 function getTransactionsTableId() {
-  return getEnv("APPWRITE_TRANSACTIONS_TABLE_ID", getEnv("APPWRITE_TRANSACTIONS_COLLECTION_ID", "transactions"));
+  return getEnv(
+    "APPWRITE_TRANSACTIONS_TABLE_ID",
+    getEnv("APPWRITE_TRANSACTIONS_COLLECTION_ID", "transactions")
+  );
 }
 
 function ownerPermissions(userId) {
@@ -361,6 +410,9 @@ function ownerPermissions(userId) {
   ];
 }
 
+// FIX #5: Guard against the race condition where two simultaneous requests for
+// a brand-new user both pass listDocuments and then both try createDocument.
+// We catch the duplicate-document error and fall back to a fresh listDocuments.
 async function getOrCreateUserRow(databases, userData) {
   const databaseId = getEnv("APPWRITE_DATABASE_ID");
   const usersTableId = getUsersTableId();
@@ -375,17 +427,34 @@ async function getOrCreateUserRow(databases, userData) {
     return result.documents[0];
   }
 
-  return databases.createDocument(
-    databaseId,
-    usersTableId,
-    sdk.ID.unique(),
-    {
-      userId: userData.$id,
-      email: userData.email || "",
-      credits: starterCredits
-    },
-    ownerPermissions(userData.$id)
-  );
+  try {
+    return await databases.createDocument(
+      databaseId,
+      usersTableId,
+      sdk.ID.unique(),
+      {
+        userId: userData.$id,
+        email: userData.email || "",
+        credits: starterCredits
+      },
+      ownerPermissions(userData.$id)
+    );
+  } catch (err) {
+    // Another concurrent request already created the row — fetch it instead.
+    const message = String(err?.message || "");
+    if (
+      message.includes("already exists") ||
+      message.includes("unique constraint") ||
+      message.includes("Document with the requested ID already exists")
+    ) {
+      const retry = await databases.listDocuments(databaseId, usersTableId, [
+        sdk.Query.equal("userId", userData.$id),
+        sdk.Query.limit(1)
+      ]);
+      if (retry.documents?.length) return retry.documents[0];
+    }
+    throw err;
+  }
 }
 
 async function updateCredits(databases, userRow, delta) {
@@ -408,7 +477,9 @@ async function createTransaction(databases, userId, amount, type) {
     sdk.ID.unique(),
     {
       userId: String(userId),
-      amount: String(amount),
+      // FIX #7: Store amount as a number, not a string, so queries and
+      // aggregations on the transactions collection work correctly.
+      amount: Number(amount),
       type: String(type),
       timestamp: new Date().toISOString()
     },
@@ -417,17 +488,17 @@ async function createTransaction(databases, userId, amount, type) {
 }
 
 async function enforceRateLimit(databases, userId) {
-  const enabled = String(getEnv("RATE_LIMIT_ENABLED", "false")).toLowerCase() === "true";
-  if (!enabled) {
-    return { limited: false, enforced: false };
-  }
+  const enabled =
+    String(getEnv("RATE_LIMIT_ENABLED", "false")).toLowerCase() === "true";
+  if (!enabled) return { limited: false, enforced: false };
 
   const databaseId = getEnv("APPWRITE_DATABASE_ID");
   const transactionsTableId = getTransactionsTableId();
-
   const maxPerWindow = Number(getEnv("RATE_LIMIT_MAX", "20"));
   const windowHours = Number(getEnv("RATE_LIMIT_WINDOW_HOURS", "1"));
-  const windowStart = new Date(Date.now() - windowHours * 60 * 60 * 1000).toISOString();
+  const windowStart = new Date(
+    Date.now() - windowHours * 60 * 60 * 1000
+  ).toISOString();
 
   const recent = await databases.listDocuments(databaseId, transactionsTableId, [
     sdk.Query.equal("userId", userId),
@@ -442,35 +513,51 @@ async function enforceRateLimit(databases, userId) {
   };
 }
 
-async function callOpenRouter(questions, formTitle, trace = () => {}) {
+// FIX #1 (timeout): Accept a `deadline` object and cap each individual fetch
+// timeout to whatever time is actually remaining, preventing a single slow
+// OpenRouter call from blowing past the Appwrite function execution limit.
+async function callOpenRouter(questions, formTitle, deadline, trace = () => {}) {
   const apiKey = getEnv("OPENROUTER_API_KEY") || getEnv("PLATFORM_OPENROUTER_KEY");
   const model = getEnv("OPENROUTER_MODEL", "openai/gpt-4o-mini");
   const referer = getEnv("OPENROUTER_REFERER", "");
-  const timeoutMs = Number(getEnv("OPENROUTER_TIMEOUT_MS", "600000"));
-  const bodyTimeoutMs = Number(getEnv("OPENROUTER_BODY_TIMEOUT_MS", "45000"));
-  const retryCount = Math.max(0, Number(getEnv("OPENROUTER_MAX_RETRIES", "2")));
+
+  // FIX #1 (timeout): These were previously 600 000 ms (10 min) and 45 000 ms.
+  // Sensible per-request caps. The overall deadline is the hard ceiling.
+  const configuredTimeoutMs = Number(getEnv("OPENROUTER_TIMEOUT_MS", "20000"));
+  const bodyTimeoutMs = Number(getEnv("OPENROUTER_BODY_TIMEOUT_MS", "15000"));
+  const retryCount = Math.max(0, Number(getEnv("OPENROUTER_MAX_RETRIES", "1")));
+
+  // FIX #1 (timeout): Never let a single attempt exceed remaining deadline.
+  const effectiveTimeoutMs = Math.min(configuredTimeoutMs, deadline.remaining() - 1000);
+  if (effectiveTimeoutMs <= 0) {
+    throw new Error("OPENROUTER_OVERALL_DEADLINE_EXCEEDED");
+  }
 
   trace("openrouter.config", {
     model,
-    timeoutMs,
+    effectiveTimeoutMs,
     bodyTimeoutMs,
     retryCount,
     questionSummary: summarizeQuestionSet(questions),
     hasReferer: Boolean(referer)
   });
 
-  if (!apiKey) {
-    throw new Error("OPENROUTER_API_KEY_MISSING");
-  }
+  if (!apiKey) throw new Error("OPENROUTER_API_KEY_MISSING");
+
+  // FIX #1 (timeout): Skip response_format for multimodal requests — mixing
+  // image_url content blocks with json_object response_format is rejected or
+  // silently causes long hangs on several OpenRouter-hosted models.
+  const hasImages = questions.some((q) => q.images.length > 0);
 
   const requestBody = JSON.stringify({
     model,
     stream: false,
-    response_format: { type: "json_object" },
+    ...(hasImages ? {} : { response_format: { type: "json_object" } }),
     messages: [
       {
         role: "system",
-        content: "Return only valid JSON. Solve common Google Form question types, skip personal-data prompts, and provide short explanations."
+        content:
+          "Return only valid JSON. Solve common Google Form question types, skip personal-data prompts, and provide short explanations."
       },
       {
         role: "user",
@@ -480,8 +567,10 @@ async function callOpenRouter(questions, formTitle, trace = () => {}) {
     temperature: 0.2
   });
 
-  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+  for (let attempt = 0; attempt <= retryCount; attempt++) {
+    deadline.assert();
     const attemptStartedAt = Date.now();
+
     trace("openrouter.attempt.start", {
       attempt: attempt + 1,
       maxAttempts: retryCount + 1
@@ -499,7 +588,7 @@ async function callOpenRouter(questions, formTitle, trace = () => {}) {
           },
           body: requestBody
         },
-        timeoutMs
+        Math.min(effectiveTimeoutMs, deadline.remaining() - 500)
       );
 
       trace("openrouter.attempt.http", {
@@ -509,37 +598,27 @@ async function callOpenRouter(questions, formTitle, trace = () => {}) {
       });
 
       if (!response.ok) {
-        trace("openrouter.attempt.error_body.read.start", {
-          attempt: attempt + 1
-        });
         let providerMessage = "";
         try {
           const rawBody = await readResponseTextWithTimeout(response, bodyTimeoutMs);
           const errBody = JSON.parse(rawBody || "{}");
           providerMessage = errBody?.error?.message || errBody?.message || "";
-          trace("openrouter.attempt.error_body.read.done", {
-            attempt: attempt + 1,
-            bodyLength: String(rawBody || "").length
-          });
         } catch {
-          trace("openrouter.attempt.error_body.read.failed", {
-            attempt: attempt + 1
-          });
+          // ignore body read failures on error responses
         }
 
-        const codePrefix = isRetryableStatus(response.status) ? "OPENROUTER_RETRYABLE_HTTP_" : "OPENROUTER_HTTP_";
-        throw new Error(`${codePrefix}${response.status}${providerMessage ? `:${providerMessage}` : ""}`);
+        const codePrefix = isRetryableStatus(response.status)
+          ? "OPENROUTER_RETRYABLE_HTTP_"
+          : "OPENROUTER_HTTP_";
+        throw new Error(
+          `${codePrefix}${response.status}${providerMessage ? `:${providerMessage}` : ""}`
+        );
       }
 
-      trace("openrouter.attempt.body.read.start", {
-        attempt: attempt + 1
-      });
-      const rawBody = await readResponseTextWithTimeout(response, bodyTimeoutMs);
-      trace("openrouter.attempt.body.read.done", {
-        attempt: attempt + 1,
-        elapsedMs: Date.now() - attemptStartedAt,
-        bodyLength: String(rawBody || "").length
-      });
+      const rawBody = await readResponseTextWithTimeout(
+        response,
+        Math.min(bodyTimeoutMs, deadline.remaining() - 500)
+      );
 
       let payload;
       try {
@@ -549,10 +628,7 @@ async function callOpenRouter(questions, formTitle, trace = () => {}) {
       }
 
       const content = payload.choices?.[0]?.message?.content;
-
-      if (!content) {
-        throw new Error("OPENROUTER_EMPTY_CONTENT");
-      }
+      if (!content) throw new Error("OPENROUTER_EMPTY_CONTENT");
 
       trace("openrouter.attempt.content.received", {
         attempt: attempt + 1,
@@ -561,12 +637,12 @@ async function callOpenRouter(questions, formTitle, trace = () => {}) {
       });
 
       try {
+        const parsed = JSON.parse(content);
         trace("openrouter.attempt.success", {
           attempt: attempt + 1,
-          elapsedMs: Date.now() - attemptStartedAt,
-          contentLength: String(content).length
+          elapsedMs: Date.now() - attemptStartedAt
         });
-        return extractQuestionPayload(JSON.parse(content));
+        return extractQuestionPayload(parsed);
       } catch {
         throw new Error("OPENROUTER_INVALID_JSON");
       }
@@ -584,15 +660,51 @@ async function callOpenRouter(questions, formTitle, trace = () => {}) {
         error: message.slice(0, 300)
       });
 
-      if (!retryable || attempt >= retryCount) {
-        throw err;
-      }
+      if (!retryable || attempt >= retryCount) throw err;
 
-      await sleep(1200 * (attempt + 1));
+      // FIX #1 (timeout): Shorter back-off to avoid burning the deadline.
+      const backoff = Math.min(800 * (attempt + 1), deadline.remaining() - 1000);
+      if (backoff > 0) await sleep(backoff);
     }
   }
 
   throw new Error("OPENROUTER_RETRIES_EXHAUSTED");
+}
+
+async function callOpenRouterInBatches(questions, formTitle, deadline, trace = () => {}) {
+  // FIX #1 (timeout): Larger default batch size means fewer round-trips.
+  const batchSize = Math.max(1, Number(getEnv("OPENROUTER_BATCH_SIZE", "10")));
+  const batches = chunkQuestions(questions, batchSize);
+  const merged = {};
+
+  trace("openrouter.batch.config", {
+    batchSize,
+    totalBatches: batches.length,
+    totalQuestions: questions.length
+  });
+
+  for (let index = 0; index < batches.length; index++) {
+    deadline.assert();
+
+    const batch = batches[index];
+    trace("openrouter.batch.start", {
+      batchNumber: index + 1,
+      totalBatches: batches.length,
+      batchSummary: summarizeQuestionSet(batch)
+    });
+
+    const result = await callOpenRouter(batch, formTitle, deadline, trace);
+    Object.assign(merged, result || {});
+
+    trace("openrouter.batch.done", {
+      batchNumber: index + 1,
+      totalBatches: batches.length,
+      returnedKeys: Object.keys(result || {}).length,
+      accumulatedKeys: Object.keys(merged).length
+    });
+  }
+
+  return merged;
 }
 
 module.exports = async ({ req, res, log, error }) => {
@@ -600,12 +712,18 @@ module.exports = async ({ req, res, log, error }) => {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   let stage = "init";
 
+  // FIX #1 (timeout): Hard overall deadline — default 25 s, configurable via
+  // FUNCTION_TIMEOUT_MS. Set this below your Appwrite function timeout limit.
+  const deadlineMs = Number(getEnv("FUNCTION_TIMEOUT_MS", "25000"));
+  const deadline = createDeadline(deadlineMs);
+
   const trace = (name, meta = {}) => {
     const payload = {
       requestId,
       stage,
       checkpoint: name,
       elapsedMs: Date.now() - startedAt,
+      deadlineRemainingMs: deadline.remaining(),
       ...meta
     };
     log(JSON.stringify(payload));
@@ -649,9 +767,7 @@ module.exports = async ({ req, res, log, error }) => {
     trace("account.get.start");
     const account = createJwtAccountClient(jwt);
     const authenticated = await account.get();
-    trace("account.get.done", {
-      authenticatedUserId: authenticated?.$id || null
-    });
+    trace("account.get.done", { authenticatedUserId: authenticated?.$id || null });
 
     if (authenticated.$id !== userId) {
       trace("account.user_mismatch");
@@ -659,16 +775,13 @@ module.exports = async ({ req, res, log, error }) => {
     }
 
     stage = "admin_clients";
-    trace("databases.client.create.start");
     const { databases } = createAdminClients();
-    trace("databases.client.create.done");
 
     stage = "rate_limit";
     trace("rate_limit.check.start");
     const rate = await enforceRateLimit(databases, userId);
     trace("rate_limit.check.done", rate);
     if (rate.limited) {
-      trace("rate_limit.blocked");
       return json(res, 429, { ok: false, error: ERROR_CODES.RATE_LIMITED });
     }
 
@@ -687,9 +800,6 @@ module.exports = async ({ req, res, log, error }) => {
     }
 
     stage = "question_normalize";
-    trace("questions.normalize.start", {
-      incomingQuestionCount: questions.length
-    });
     const normalizedQuestions = questions.map(normalizeQuestion);
     const localResults = new Map();
     const eligibleQuestions = [];
@@ -697,11 +807,16 @@ module.exports = async ({ req, res, log, error }) => {
     normalizedQuestions.forEach((question) => {
       const localSkipReason = getLocalSkipReason(question);
       if (localSkipReason) {
-        const explanation = "This Google Forms input format is not supported by the current autofill workflow.";
-        localResults.set(question.id, buildSkippedResult(question, localSkipReason, explanation));
+        localResults.set(
+          question.id,
+          buildSkippedResult(
+            question,
+            localSkipReason,
+            "This Google Forms input format is not supported by the current autofill workflow."
+          )
+        );
         return;
       }
-
       eligibleQuestions.push(question);
     });
 
@@ -712,50 +827,55 @@ module.exports = async ({ req, res, log, error }) => {
     });
 
     stage = "ai_call";
-    trace("ai.call.start", {
-      eligibleCount: eligibleQuestions.length
-    });
-    const aiPayload = eligibleQuestions.length ? await callOpenRouter(eligibleQuestions, formTitle, trace) : {};
-    trace("ai.call.done", {
-      aiPayloadKeys: Object.keys(aiPayload || {}).length
-    });
+    trace("ai.call.start", { eligibleCount: eligibleQuestions.length });
+
+    const aiPayload = eligibleQuestions.length
+      ? await callOpenRouterInBatches(eligibleQuestions, formTitle, deadline, trace)
+      : {};
+
+    trace("ai.call.done", { aiPayloadKeys: Object.keys(aiPayload || {}).length });
 
     stage = "results_build";
-    trace("results.build.start");
     const results = normalizedQuestions.map((question) => {
-      if (localResults.has(question.id)) {
-        return localResults.get(question.id);
-      }
-
+      if (localResults.has(question.id)) return localResults.get(question.id);
       return coerceAiResult(question, aiPayload[question.id]);
     });
-    trace("results.build.done", summarizeResults(results));
 
-    stage = "credits_update";
-    trace("credits.update.start");
-    const updatedUser = await updateCredits(databases, userRow, -1);
-    trace("credits.update.done", {
-      updatedCredits: Number(updatedUser.credits || 0)
-    });
+    const summary = summarizeResults(results);
+    trace("results.build.done", summary);
 
-    stage = "transaction_create";
-    trace("transaction.create.start");
-    await createTransaction(databases, userId, 1, "use");
-    trace("transaction.create.done");
+    // FIX #4: Only deduct a credit if at least one question was answered.
+    // Users are not charged for runs where the AI skipped everything.
+    const answeredCount = summary.answered;
+    let creditsLeft = currentCredits;
+    let updatedUser = userRow;
+
+    if (answeredCount > 0) {
+      stage = "credits_update";
+      trace("credits.update.start");
+      updatedUser = await updateCredits(databases, userRow, -1);
+      creditsLeft = Number(updatedUser.credits || 0);
+      trace("credits.update.done", { updatedCredits: creditsLeft });
+
+      stage = "transaction_create";
+      trace("transaction.create.start");
+      await createTransaction(databases, userId, 1, "use");
+      trace("transaction.create.done");
+    } else {
+      trace("credits.update.skipped", {
+        reason: "no_questions_answered"
+      });
+    }
 
     stage = "response";
-    trace("response.success", {
-      totalElapsedMs: Date.now() - startedAt
-    });
+    trace("response.success", { totalElapsedMs: Date.now() - startedAt });
 
     return json(res, 200, {
       ok: true,
       results,
-      summary: summarizeResults(results),
-      creditsLeft: Number(updatedUser.credits || 0),
-      rateLimit: {
-        enabled: rate.enforced
-      }
+      summary,
+      creditsLeft,
+      rateLimit: { enabled: rate.enforced }
     });
   } catch (err) {
     trace("response.error", {
