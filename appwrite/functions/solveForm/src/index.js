@@ -183,6 +183,9 @@ function buildPromptText(formTitle, questions) {
   const lines = [
     "You are solving a Google Form for the current user.",
     "Answer the provided questions as accurately as possible.",
+    "For SHORT_ANSWER and PARAGRAPH questions, always provide a best-effort answer.",
+    "If the question asks for code/programs, provide code directly in the answer.",
+    "Do not skip supported question types due to complexity or task scope.",
     "If an image is required to answer but is unclear, skip it with reason 'unclear_image'.",
     "If you are uncertain, skip it with reason 'low_ai_confidence'.",
     "Return only valid JSON with this exact shape:",
@@ -256,8 +259,29 @@ function coerceAiResult(question, aiResult) {
     aiResult.reason || (requestedStatus === "answered" ? "answered" : "insufficient_context")
   );
   const explanation = cleanText(aiResult.explanation || "");
+  const normalizedAnswer = normalizeAnswerForType(question, aiResult.answer);
 
   if (requestedStatus === "skipped") {
+    const hasAnswer = question.type === "CHECKBOX" ? normalizedAnswer.length > 0 : Boolean(normalizedAnswer);
+
+    // Some model responses mark supported questions as skipped while still
+    // providing a usable answer. Prefer filling that answer.
+    if (question.supported && hasAnswer) {
+      return {
+        id: question.id,
+        type: question.type,
+        question: question.question,
+        status: "answered",
+        skipReason: null,
+        reasonLabel: humanizeReason("answered"),
+        explanation:
+          explanation ||
+          "Answer generated and used even though the model marked this item as skipped.",
+        confidence,
+        answer: normalizedAnswer
+      };
+    }
+
     return buildSkippedResult(
       question,
       requestedReason,
@@ -265,7 +289,6 @@ function coerceAiResult(question, aiResult) {
     );
   }
 
-  const normalizedAnswer = normalizeAnswerForType(question, aiResult.answer);
   const missingAnswer =
     question.type === "CHECKBOX" ? normalizedAnswer.length === 0 : !normalizedAnswer;
 
