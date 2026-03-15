@@ -94,11 +94,11 @@ function detectQuestionType(block) {
   if (block.querySelector('input[type="date"]')) return "DATE";
   if (block.querySelector('input[type="time"]')) return "TIME";
 
-  if (block.querySelector('input[type="radio"]')) {
+  if (block.querySelector('input[type="radio"], [role="radio"]')) {
     return hasGridLayout(block) ? "MULTIPLE_CHOICE_GRID" : "MULTIPLE_CHOICE";
   }
 
-  if (block.querySelector('input[type="checkbox"]')) {
+  if (block.querySelector('input[type="checkbox"], [role="checkbox"]')) {
     return hasGridLayout(block) ? "CHECKBOX_GRID" : "CHECKBOX";
   }
 
@@ -466,6 +466,52 @@ function textOfLabelForInput(input) {
   return cleanText(label?.textContent || "");
 }
 
+function textOfChoiceElement(element) {
+  if (!element) return "";
+
+  if (element.matches('input[type="radio"], input[type="checkbox"]')) {
+    return textOfLabelForInput(element);
+  }
+
+  return cleanText(element.getAttribute("aria-label") || element.textContent || "");
+}
+
+function findQuestionBlockById(id) {
+  const value = String(id || "");
+  if (!value) return null;
+
+  if (/^entry\.\d+$/.test(value)) {
+    const field = document.querySelector(`[name="${CSS.escape(value)}"]`);
+    if (field) {
+      return findQuestionContainer(field);
+    }
+  }
+
+  if (/^\d+$/.test(value)) {
+    const blocks = Array.from(document.querySelectorAll("[data-params]"));
+    const matched = blocks.find((el) => String(el.getAttribute("data-params") || "").includes(`[[${value},`));
+    if (matched) {
+      return findQuestionContainer(matched);
+    }
+  }
+
+  return null;
+}
+
+function chooseBestOption(elements, expected) {
+  const normalizedExpected = normalizeForMatch(expected);
+  if (!normalizedExpected) {
+    return null;
+  }
+
+  return elements.find((element) => normalizeForMatch(textOfChoiceElement(element)) === normalizedExpected) ||
+    elements.find((element) => {
+      const candidate = normalizeForMatch(textOfChoiceElement(element));
+      return candidate && (candidate.includes(normalizedExpected) || normalizedExpected.includes(candidate));
+    }) ||
+    null;
+}
+
 function fillShortAnswer(id, value) {
   const input = document.querySelector(`input[name="${CSS.escape(id)}"]`);
   if (!input) return { filled: false, reason: "field_not_found" };
@@ -507,13 +553,23 @@ function fillParagraph(id, value) {
 
 function fillMultipleChoice(id, value) {
   const radios = Array.from(document.querySelectorAll(`input[type="radio"][name="${CSS.escape(id)}"]`));
-  if (!radios.length) return { filled: false, reason: "field_not_found" };
+  if (radios.length) {
+    const target = chooseBestOption(radios, value);
+    if (!target) {
+      return { filled: false, reason: "option_not_found" };
+    }
 
-  const expected = normalizeForMatch(value);
-  const target = radios.find((radio) => normalizeForMatch(textOfLabelForInput(radio)) === expected) || radios.find((radio) => {
-    const labelText = normalizeForMatch(textOfLabelForInput(radio));
-    return labelText.includes(expected) || expected.includes(labelText);
-  });
+    target.click();
+    return { filled: true };
+  }
+
+  const block = findQuestionBlockById(id);
+  const roleRadios = block ? Array.from(block.querySelectorAll('[role="radio"]')) : [];
+  if (!roleRadios.length) {
+    return { filled: false, reason: "field_not_found" };
+  }
+
+  const target = chooseBestOption(roleRadios, value);
 
   if (!target) {
     return { filled: false, reason: "option_not_found" };
@@ -526,16 +582,42 @@ function fillMultipleChoice(id, value) {
 function fillCheckbox(id, values) {
   const expected = new Set((Array.isArray(values) ? values : [values]).map((value) => normalizeForMatch(value)).filter(Boolean));
   const boxes = Array.from(document.querySelectorAll(`input[type="checkbox"][name="${CSS.escape(id)}"]`));
-  if (!boxes.length) return { filled: false, reason: "field_not_found" };
+  if (boxes.length) {
+    const available = new Set(boxes.map((box) => normalizeForMatch(textOfLabelForInput(box))).filter(Boolean));
+    let toggled = 0;
 
-  const available = new Set(boxes.map((box) => normalizeForMatch(textOfLabelForInput(box))).filter(Boolean));
+    boxes.forEach((box) => {
+      const labelText = normalizeForMatch(textOfLabelForInput(box));
+      const shouldSelect = expected.has(labelText);
+
+      if (shouldSelect !== box.checked) {
+        box.click();
+        toggled += 1;
+      }
+    });
+
+    if (Array.from(expected).some((value) => !available.has(value))) {
+      return { filled: false, reason: "option_not_found" };
+    }
+
+    return { filled: toggled > 0 || expected.size > 0, reason: expected.size ? undefined : "empty_selection" };
+  }
+
+  const block = findQuestionBlockById(id);
+  const roleBoxes = block ? Array.from(block.querySelectorAll('[role="checkbox"]')) : [];
+  if (!roleBoxes.length) {
+    return { filled: false, reason: "field_not_found" };
+  }
+
+  const available = new Set(roleBoxes.map((box) => normalizeForMatch(textOfChoiceElement(box))).filter(Boolean));
   let toggled = 0;
 
-  boxes.forEach((box) => {
-    const labelText = normalizeForMatch(textOfLabelForInput(box));
+  roleBoxes.forEach((box) => {
+    const labelText = normalizeForMatch(textOfChoiceElement(box));
     const shouldSelect = expected.has(labelText);
+    const isChecked = String(box.getAttribute("aria-checked") || "false") === "true";
 
-    if (shouldSelect !== box.checked) {
+    if (shouldSelect !== isChecked) {
       box.click();
       toggled += 1;
     }
