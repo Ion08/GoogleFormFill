@@ -108,8 +108,7 @@ async function getOrCreateUserRow(databases, userData) {
     {
       userId: userData.$id,
       email: userData.email || "",
-      credits: starterCredits,
-      createdAt: new Date().toISOString()
+      credits: starterCredits
     },
     ownerPermissions(userData.$id)
   );
