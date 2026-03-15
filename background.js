@@ -170,6 +170,15 @@ function tryParseJsonText(text) {
   }
 }
 
+function looksLikeSolvePayload(value) {
+  return (
+    value &&
+    typeof value === "object" &&
+    typeof value.ok === "boolean" &&
+    (Array.isArray(value.results) || value.error)
+  );
+}
+
 function decodeBase64IfPossible(value) {
   const text = String(value || "").trim();
   if (!text || text.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(text)) {
@@ -187,7 +196,27 @@ function coerceParsedPayload(value) {
   if (!value) return null;
 
   if (typeof value === "object") {
-    return value;
+    if (looksLikeSolvePayload(value)) {
+      return value;
+    }
+
+    const nestedCandidates = [
+      value.body,
+      value.responseBody,
+      value.response,
+      value.payload,
+      value.data,
+      value.output,
+      value.stdout,
+      value.result
+    ];
+
+    for (const candidate of nestedCandidates) {
+      const parsedNested = coerceParsedPayload(candidate);
+      if (parsedNested) return parsedNested;
+    }
+
+    return null;
   }
 
   const text = String(value).trim();
@@ -223,6 +252,18 @@ function coerceParsedPayload(value) {
     }
   }
 
+  try {
+    const uriDecoded = decodeURIComponent(text);
+    if (uriDecoded !== text) {
+      const fromUriDecoded = tryParseJsonText(uriDecoded);
+      if (fromUriDecoded && typeof fromUriDecoded === "object") {
+        return fromUriDecoded;
+      }
+    }
+  } catch {
+    // Not URL encoded; ignore.
+  }
+
   return null;
 }
 
@@ -231,7 +272,11 @@ function parseExecutionBody(execution) {
     execution?.responseBody,
     execution?.response?.body,
     execution?.response,
-    execution?.stdout
+    execution?.stdout,
+    execution?.output,
+    execution?.body,
+    execution?.data,
+    execution
   ];
 
   for (const raw of rawCandidates) {
@@ -317,7 +362,7 @@ async function executeSolveFunction(config, session, payload) {
       functionId: config.appwriteFunctionSolveId,
       body: JSON.stringify(payload),
       async: true,
-      xpath: "/solve",
+      path: "/solve",
       method: "POST",
       headers: { "Content-Type": "application/json" }
     });
