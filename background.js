@@ -201,7 +201,6 @@ function emitSolveProgress(percent, text, extra = {}) {
 function humanizeReportReason(code) {
   const labels = {
     answered: "Answered",
-    requires_personal_data: "Requires personal data",
     unsupported_question_type: "Unsupported question type",
     unclear_image: "Unclear image",
     low_ai_confidence: "Low AI confidence",

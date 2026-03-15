@@ -18,18 +18,6 @@ const SUPPORTED_SOLVE_TYPES = new Set([
 
 const LOW_CONFIDENCE_THRESHOLD = 0.55;
 const MAX_IMAGE_COUNT_PER_QUESTION = 3;
-const SENSITIVE_PATTERNS = [
-  /\b(full\s+name|first\s+name|last\s+name|your\s+name|student\s+name)\b/i,
-  /\b(email|e-mail|gmail)\b/i,
-  /\b(phone|mobile|telephone|whatsapp|contact\s+number)\b/i,
-  /\b(address|street|city|zip|postal\s+code|country)\b/i,
-  /\b(date\s+of\s+birth|birthdate|birthday|age)\b/i,
-  /\b(student\s*id|school\s*id|national\s*id|passport|ssn|social\s+security)\b/i,
-  /\bcredit\s+card|debit\s+card|iban|bank\s+account|cvv\b/i,
-  /\bpassword|passcode|pin\b/i,
-  /\bsignature\b/i,
-  /\bpersonal\s+information|personal\s+data|private\s+information\b/i
-];
 
 function getEnv(name, fallback = "") {
   return process.env[name] || fallback;
@@ -118,16 +106,7 @@ function normalizeQuestion(question, index) {
   };
 }
 
-function matchesSensitivePattern(question) {
-  const haystack = [question.question, question.description, question.options.join(" ")].filter(Boolean).join(" ");
-  return SENSITIVE_PATTERNS.some((pattern) => pattern.test(haystack));
-}
-
 function getLocalSkipReason(question) {
-  if (matchesSensitivePattern(question)) {
-    return "requires_personal_data";
-  }
-
   if (!SUPPORTED_SOLVE_TYPES.has(question.type) || !question.supported) {
     return "unsupported_question_type";
   }
@@ -138,7 +117,6 @@ function getLocalSkipReason(question) {
 function humanizeReason(code) {
   const labels = {
     answered: "Answered",
-    requires_personal_data: "Requires personal data",
     unsupported_question_type: "Unsupported question type",
     unclear_image: "Unclear image",
     low_ai_confidence: "Low AI confidence",
@@ -191,12 +169,11 @@ function normalizeAnswerForType(question, rawAnswer) {
 function buildPromptText(formTitle, questions) {
   const lines = [
     "You are solving a Google Form for the current user.",
-    "Only answer academic or general knowledge questions.",
-    "Skip any question that asks for personal, identifying, or sensitive information.",
+    "Answer the provided questions as accurately as possible.",
     "If an image is required to answer but is unclear, skip it with reason 'unclear_image'.",
     "If you are uncertain, skip it with reason 'low_ai_confidence'.",
     "Return only valid JSON with this exact shape:",
-    '{"questions":{"<id>":{"status":"answered|skipped","answer":"string or array for checkbox","reason":"answered|requires_personal_data|unsupported_question_type|unclear_image|low_ai_confidence|insufficient_context","explanation":"short reasoning","confidence":0.0}}}',
+    '{"questions":{"<id>":{"status":"answered|skipped","answer":"string or array for checkbox","reason":"answered|unsupported_question_type|unclear_image|low_ai_confidence|insufficient_context","explanation":"short reasoning","confidence":0.0}}}',
     "Confidence must be between 0 and 1.",
     "Form title: " + (formTitle || "Untitled Form"),
     "Questions:"
@@ -443,7 +420,7 @@ async function callOpenRouter(questions, formTitle) {
   const apiKey = getEnv("OPENROUTER_API_KEY") || getEnv("PLATFORM_OPENROUTER_KEY");
   const model = getEnv("OPENROUTER_MODEL", "openai/gpt-4o-mini");
   const referer = getEnv("OPENROUTER_REFERER", "");
-  const timeoutMs = Number(getEnv("OPENROUTER_TIMEOUT_MS", "120000"));
+  const timeoutMs = Number(getEnv("OPENROUTER_TIMEOUT_MS", "600000"));
   const retryCount = Math.max(0, Number(getEnv("OPENROUTER_MAX_RETRIES", "2")));
 
   if (!apiKey) {
@@ -567,9 +544,7 @@ module.exports = async ({ req, res, log, error }) => {
     normalizedQuestions.forEach((question) => {
       const localSkipReason = getLocalSkipReason(question);
       if (localSkipReason) {
-        const explanation = localSkipReason === "requires_personal_data"
-          ? "This question appears to request personal or sensitive information, so it was intentionally left unanswered."
-          : "This Google Forms input format is not supported by the current autofill workflow.";
+        const explanation = "This Google Forms input format is not supported by the current autofill workflow.";
         localResults.set(question.id, buildSkippedResult(question, localSkipReason, explanation));
         return;
       }
