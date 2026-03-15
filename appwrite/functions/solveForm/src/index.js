@@ -287,6 +287,23 @@ function isRetryableStatus(status) {
   return [408, 409, 425, 429, 500, 502, 503, 504, 524].includes(Number(status));
 }
 
+function summarizeQuestionSet(questions) {
+  const byType = {};
+  let imageCount = 0;
+
+  questions.forEach((question) => {
+    const type = String(question?.type || "UNKNOWN");
+    byType[type] = (byType[type] || 0) + 1;
+    imageCount += Array.isArray(question?.images) ? question.images.length : 0;
+  });
+
+  return {
+    total: questions.length,
+    byType,
+    imageCount
+  };
+}
+
 async function fetchOpenRouterWithTimeout(url, options, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -416,12 +433,20 @@ async function enforceRateLimit(databases, userId) {
   };
 }
 
-async function callOpenRouter(questions, formTitle) {
+async function callOpenRouter(questions, formTitle, trace = () => {}) {
   const apiKey = getEnv("OPENROUTER_API_KEY") || getEnv("PLATFORM_OPENROUTER_KEY");
   const model = getEnv("OPENROUTER_MODEL", "openai/gpt-4o-mini");
   const referer = getEnv("OPENROUTER_REFERER", "");
   const timeoutMs = Number(getEnv("OPENROUTER_TIMEOUT_MS", "600000"));
   const retryCount = Math.max(0, Number(getEnv("OPENROUTER_MAX_RETRIES", "2")));
+
+  trace("openrouter.config", {
+    model,
+    timeoutMs,
+    retryCount,
+    questionSummary: summarizeQuestionSet(questions),
+    hasReferer: Boolean(referer)
+  });
 
   if (!apiKey) {
     throw new Error("OPENROUTER_API_KEY_MISSING");
@@ -444,6 +469,12 @@ async function callOpenRouter(questions, formTitle) {
   });
 
   for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    const attemptStartedAt = Date.now();
+    trace("openrouter.attempt.start", {
+      attempt: attempt + 1,
+      maxAttempts: retryCount + 1
+    });
+
     try {
       const response = await fetchOpenRouterWithTimeout(
         "https://openrouter.ai/api/v1/chat/completions",
@@ -458,6 +489,12 @@ async function callOpenRouter(questions, formTitle) {
         },
         timeoutMs
       );
+
+      trace("openrouter.attempt.http", {
+        attempt: attempt + 1,
+        status: response.status,
+        elapsedMs: Date.now() - attemptStartedAt
+      });
 
       if (!response.ok) {
         let providerMessage = "";
@@ -480,6 +517,11 @@ async function callOpenRouter(questions, formTitle) {
       }
 
       try {
+        trace("openrouter.attempt.success", {
+          attempt: attempt + 1,
+          elapsedMs: Date.now() - attemptStartedAt,
+          contentLength: String(content).length
+        });
         return extractQuestionPayload(JSON.parse(content));
       } catch {
         throw new Error("OPENROUTER_INVALID_JSON");
@@ -487,6 +529,13 @@ async function callOpenRouter(questions, formTitle) {
     } catch (err) {
       const message = String(err?.message || "");
       const retryable = message.startsWith("OPENROUTER_TIMEOUT_") || message.startsWith("OPENROUTER_RETRYABLE_HTTP_");
+
+      trace("openrouter.attempt.error", {
+        attempt: attempt + 1,
+        elapsedMs: Date.now() - attemptStartedAt,
+        retryable,
+        error: message.slice(0, 300)
+      });
 
       if (!retryable || attempt >= retryCount) {
         throw err;
@@ -500,43 +549,100 @@ async function callOpenRouter(questions, formTitle) {
 }
 
 module.exports = async ({ req, res, log, error }) => {
+  const startedAt = Date.now();
+  const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  let stage = "init";
+
+  const trace = (name, meta = {}) => {
+    const payload = {
+      requestId,
+      stage,
+      checkpoint: name,
+      elapsedMs: Date.now() - startedAt,
+      ...meta
+    };
+    log(JSON.stringify(payload));
+  };
+
+  trace("request.received", {
+    method: req?.method || "unknown",
+    path: req?.path || "unknown",
+    bodyType: typeof req?.body,
+    bodyLength: typeof req?.body === "string" ? req.body.length : null,
+    headersPresent: Boolean(req?.headers)
+  });
+
   const data = parseJsonBody(req);
   if (!data) {
+    trace("request.invalid_json");
     return json(res, 400, { ok: false, error: ERROR_CODES.FORM_PARSE_ERROR });
   }
 
   const { userId, jwt, questions, formTitle } = data;
 
+  trace("request.parsed", {
+    hasUserId: Boolean(userId),
+    hasJwt: Boolean(jwt),
+    questionCount: Array.isArray(questions) ? questions.length : 0,
+    formTitleLength: String(formTitle || "").length
+  });
+
   if (!userId || !jwt) {
+    trace("request.auth_missing");
     return json(res, 401, { ok: false, error: ERROR_CODES.AUTH_REQUIRED });
   }
 
   if (!Array.isArray(questions) || questions.length === 0) {
+    trace("request.questions_missing");
     return json(res, 400, { ok: false, error: ERROR_CODES.FORM_PARSE_ERROR });
   }
 
   try {
+    stage = "account_auth";
+    trace("account.get.start");
     const account = createJwtAccountClient(jwt);
     const authenticated = await account.get();
+    trace("account.get.done", {
+      authenticatedUserId: authenticated?.$id || null
+    });
 
     if (authenticated.$id !== userId) {
+      trace("account.user_mismatch");
       return json(res, 401, { ok: false, error: ERROR_CODES.AUTH_REQUIRED });
     }
 
+    stage = "admin_clients";
+    trace("databases.client.create.start");
     const { databases } = createAdminClients();
+    trace("databases.client.create.done");
 
+    stage = "rate_limit";
+    trace("rate_limit.check.start");
     const rate = await enforceRateLimit(databases, userId);
+    trace("rate_limit.check.done", rate);
     if (rate.limited) {
+      trace("rate_limit.blocked");
       return json(res, 429, { ok: false, error: ERROR_CODES.RATE_LIMITED });
     }
 
+    stage = "credits_load";
+    trace("user_row.get_or_create.start");
     const userRow = await getOrCreateUserRow(databases, authenticated);
     const currentCredits = Number(userRow.credits || 0);
+    trace("user_row.get_or_create.done", {
+      userRowId: userRow?.$id || null,
+      currentCredits
+    });
 
     if (currentCredits < 1) {
+      trace("credits.insufficient");
       return json(res, 402, { ok: false, error: ERROR_CODES.NO_CREDITS });
     }
 
+    stage = "question_normalize";
+    trace("questions.normalize.start", {
+      incomingQuestionCount: questions.length
+    });
     const normalizedQuestions = questions.map(normalizeQuestion);
     const localResults = new Map();
     const eligibleQuestions = [];
@@ -552,7 +658,23 @@ module.exports = async ({ req, res, log, error }) => {
       eligibleQuestions.push(question);
     });
 
-    const aiPayload = eligibleQuestions.length ? await callOpenRouter(eligibleQuestions, formTitle) : {};
+    trace("questions.normalize.done", {
+      normalizedSummary: summarizeQuestionSet(normalizedQuestions),
+      eligibleSummary: summarizeQuestionSet(eligibleQuestions),
+      locallySkipped: localResults.size
+    });
+
+    stage = "ai_call";
+    trace("ai.call.start", {
+      eligibleCount: eligibleQuestions.length
+    });
+    const aiPayload = eligibleQuestions.length ? await callOpenRouter(eligibleQuestions, formTitle, trace) : {};
+    trace("ai.call.done", {
+      aiPayloadKeys: Object.keys(aiPayload || {}).length
+    });
+
+    stage = "results_build";
+    trace("results.build.start");
     const results = normalizedQuestions.map((question) => {
       if (localResults.has(question.id)) {
         return localResults.get(question.id);
@@ -560,9 +682,24 @@ module.exports = async ({ req, res, log, error }) => {
 
       return coerceAiResult(question, aiPayload[question.id]);
     });
+    trace("results.build.done", summarizeResults(results));
 
+    stage = "credits_update";
+    trace("credits.update.start");
     const updatedUser = await updateCredits(databases, userRow, -1);
+    trace("credits.update.done", {
+      updatedCredits: Number(updatedUser.credits || 0)
+    });
+
+    stage = "transaction_create";
+    trace("transaction.create.start");
     await createTransaction(databases, userId, 1, "use");
+    trace("transaction.create.done");
+
+    stage = "response";
+    trace("response.success", {
+      totalElapsedMs: Date.now() - startedAt
+    });
 
     return json(res, 200, {
       ok: true,
@@ -574,6 +711,11 @@ module.exports = async ({ req, res, log, error }) => {
       }
     });
   } catch (err) {
+    trace("response.error", {
+      stage,
+      totalElapsedMs: Date.now() - startedAt,
+      errorMessage: String(err?.message || "").slice(0, 400)
+    });
     error(`solveForm failed: ${err.message}`);
     log(err.stack || "no-stack");
     return json(res, 500, {
