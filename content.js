@@ -689,10 +689,29 @@ function fillCheckbox(id, values, questionText) {
   return { filled: toggled > 0 || expected.size > 0, reason: expected.size ? undefined : "empty_selection" };
 }
 
-function fillDropdown(id, value) {
+function fillDropdown(id, value, questionText) {
   const select = document.querySelector(`select[name="${CSS.escape(id)}"]`);
   if (!select) {
-    return { filled: false, reason: "field_not_found" };
+    const block = findQuestionBlockById(id) || findQuestionBlockByText(questionText, "DROPDOWN");
+    const listbox = block?.querySelector('[role="listbox"], [role="combobox"]');
+    if (!listbox) {
+      return { filled: false, reason: "field_not_found" };
+    }
+
+    listbox.click();
+
+    const visibleOptions = Array.from(document.querySelectorAll('[role="option"]')).filter((opt) => {
+      if (opt.closest('[aria-hidden="true"]')) return false;
+      return opt.getClientRects().length > 0;
+    });
+
+    const target = chooseBestOption(visibleOptions, value);
+    if (!target) {
+      return { filled: false, reason: "option_not_found" };
+    }
+
+    target.click();
+    return { filled: true };
   }
 
   const normalized = normalizeForMatch(value);
@@ -736,7 +755,7 @@ function fillQuestionResult(result) {
   } else if (!outcome.filled && result.type === "CHECKBOX") {
     outcome = fillCheckbox(result.id, result.answer, result.question);
   } else if (!outcome.filled && result.type === "DROPDOWN") {
-    outcome = fillDropdown(result.id, result.answer);
+    outcome = fillDropdown(result.id, result.answer, result.question);
   }
 
   return {

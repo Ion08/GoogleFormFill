@@ -24,6 +24,14 @@ function getEnv(name, fallback = "") {
   return process.env[name] || fallback;
 }
 
+function requireEnv(name) {
+  const value = getEnv(name);
+  if (!String(value || "").trim()) {
+    throw new Error(`CONFIG_MISSING_${name}`);
+  }
+  return value;
+}
+
 function parseJsonBody(req) {
   try {
     if (!req.body) return {};
@@ -40,6 +48,10 @@ function json(res, status, payload) {
 
 function classifyFailure(err) {
   const message = String(err?.message || "");
+
+  if (message.startsWith("CONFIG_MISSING_")) {
+    return { code: message };
+  }
 
   if (message.startsWith("OPENROUTER_")) {
     return { code: message.split(":")[0] };
@@ -66,8 +78,8 @@ function classifyFailure(err) {
 
 function createAdminClients() {
   const endpoint = getEnv("APPWRITE_ENDPOINT", "https://fra.cloud.appwrite.io/v1");
-  const projectId = getEnv("APPWRITE_PROJECT_ID");
-  const apiKey = getEnv("APPWRITE_API_KEY");
+  const projectId = requireEnv("APPWRITE_PROJECT_ID");
+  const apiKey = requireEnv("APPWRITE_API_KEY");
 
   const client = new sdk.Client()
     .setEndpoint(endpoint)
@@ -404,7 +416,7 @@ async function readResponseTextWithTimeout(response, timeoutMs) {
 
 function createJwtAccountClient(jwt) {
   const endpoint = getEnv("APPWRITE_ENDPOINT", "https://fra.cloud.appwrite.io/v1");
-  const projectId = getEnv("APPWRITE_PROJECT_ID");
+  const projectId = requireEnv("APPWRITE_PROJECT_ID");
 
   const client = new sdk.Client()
     .setEndpoint(endpoint)
@@ -437,7 +449,7 @@ function ownerPermissions(userId) {
 // a brand-new user both pass listDocuments and then both try createDocument.
 // We catch the duplicate-document error and fall back to a fresh listDocuments.
 async function getOrCreateUserRow(databases, userData) {
-  const databaseId = getEnv("APPWRITE_DATABASE_ID");
+  const databaseId = requireEnv("APPWRITE_DATABASE_ID");
   const usersTableId = getUsersTableId();
   const starterCredits = Number(getEnv("STARTER_CREDITS", "5"));
 
@@ -458,7 +470,8 @@ async function getOrCreateUserRow(databases, userData) {
       {
         userId: userData.$id,
         email: userData.email || "",
-        credits: starterCredits
+          credits: starterCredits,
+          createdAt: new Date().toISOString()
       },
       ownerPermissions(userData.$id)
     );
@@ -481,7 +494,7 @@ async function getOrCreateUserRow(databases, userData) {
 }
 
 async function updateCredits(databases, userRow, delta) {
-  const databaseId = getEnv("APPWRITE_DATABASE_ID");
+  const databaseId = requireEnv("APPWRITE_DATABASE_ID");
   const usersTableId = getUsersTableId();
   const nextCredits = Number(userRow.credits || 0) + delta;
 
@@ -491,7 +504,7 @@ async function updateCredits(databases, userRow, delta) {
 }
 
 async function createTransaction(databases, userId, amount, type) {
-  const databaseId = getEnv("APPWRITE_DATABASE_ID");
+  const databaseId = requireEnv("APPWRITE_DATABASE_ID");
   const transactionsTableId = getTransactionsTableId();
 
   const amountString = String(amount);
@@ -534,7 +547,7 @@ async function enforceRateLimit(databases, userId) {
     String(getEnv("RATE_LIMIT_ENABLED", "false")).toLowerCase() === "true";
   if (!enabled) return { limited: false, enforced: false };
 
-  const databaseId = getEnv("APPWRITE_DATABASE_ID");
+  const databaseId = requireEnv("APPWRITE_DATABASE_ID");
   const transactionsTableId = getTransactionsTableId();
   const maxPerWindow = Number(getEnv("RATE_LIMIT_MAX", "20"));
   const windowHours = Number(getEnv("RATE_LIMIT_WINDOW_HOURS", "1"));
@@ -783,6 +796,27 @@ module.exports = async ({ req, res, log, error }) => {
   if (!data) {
     trace("request.invalid_json");
     return json(res, 400, { ok: false, error: ERROR_CODES.FORM_PARSE_ERROR });
+  }
+
+  // Route: /init — ensures user row exists on first login, returning real starter credits.
+  if (req.path === "/init") {
+    const { userId: initUserId, jwt: initJwt } = data;
+    if (!initUserId || !initJwt) {
+      return json(res, 401, { ok: false, error: ERROR_CODES.AUTH_REQUIRED });
+    }
+    try {
+      const account = createJwtAccountClient(initJwt);
+      const authenticated = await account.get();
+      if (authenticated.$id !== initUserId) {
+        return json(res, 401, { ok: false, error: ERROR_CODES.AUTH_REQUIRED });
+      }
+      const { databases } = createAdminClients();
+      const userRow = await getOrCreateUserRow(databases, authenticated);
+      return json(res, 200, { ok: true, credits: Number(userRow.credits || 0) });
+    } catch (err) {
+      error(`initUser failed: ${err.message}`);
+      return json(res, 500, { ok: false, error: ERROR_CODES.AI_ERROR, details: classifyFailure(err) });
+    }
   }
 
   const { userId, jwt, questions, formTitle } = data;

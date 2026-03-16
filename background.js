@@ -14,6 +14,8 @@ const STORAGE_KEYS = {
   inFlightSolve: "af_in_flight_solve"
 };
 
+const SOLVE_LOCK_TTL_MS = 15 * 60 * 1000;
+
 function isPlaceholder(value) {
   return typeof value === "string" && value.startsWith("YOUR_");
 }
@@ -51,12 +53,16 @@ async function clearSession() {
   await chrome.storage.local.remove(STORAGE_KEYS.session);
 }
 
-function buildOAuthUrlWithSdk(config, successRedirect, failureRedirect) {
+function buildOAuthUrlWithSdk(config, successRedirect, failureRedirect, options = {}) {
   const params = new URLSearchParams({
     project: config.appwriteProjectId,
     success: successRedirect,
     failure: failureRedirect
   });
+
+  if (options.prompt) {
+    params.set("prompt", options.prompt);
+  }
 
   return `${config.appwriteEndpoint}/account/tokens/oauth2/google?${params.toString()}`;
 }
@@ -142,20 +148,33 @@ async function getUserCredits(config, session) {
     .setProject(config.appwriteProjectId)
     .setSession(session.secret);
 
-  const tablesDB = new self.Appwrite.TablesDB(client);
-  const usersTableId = config.appwriteUsersTableId || config.appwriteUsersCollectionId || "users";
+  const usersCollectionId = config.appwriteUsersTableId || config.appwriteUsersCollectionId || "users";
 
-  const result = await tablesDB.listRows(config.appwriteDatabaseId, usersTableId, [
-    self.Appwrite.Query.equal("userId", session.userId),
-    self.Appwrite.Query.limit(1)
-  ]);
+  // Primary path matches the backend implementation, which uses Databases collections.
+  try {
+    const databases = new self.Appwrite.Databases(client);
+    const documentsResult = await databases.listDocuments(config.appwriteDatabaseId, usersCollectionId, [
+      self.Appwrite.Query.equal("userId", session.userId),
+      self.Appwrite.Query.limit(1)
+    ]);
 
-  const userRow = result.rows?.[0];
-  if (!userRow) {
-    return { credits: 0 };
+    const userDoc = documentsResult.documents?.[0];
+    return { credits: Number(userDoc?.credits || 0) };
+  } catch (firstErr) {
+    // Backward compatibility: support older TablesDB deployments.
+    try {
+      const tablesDB = new self.Appwrite.TablesDB(client);
+      const rowsResult = await tablesDB.listRows(config.appwriteDatabaseId, usersCollectionId, [
+        self.Appwrite.Query.equal("userId", session.userId),
+        self.Appwrite.Query.limit(1)
+      ]);
+
+      const userRow = rowsResult.rows?.[0];
+      return { credits: Number(userRow?.credits || 0) };
+    } catch {
+      throw firstErr;
+    }
   }
-
-  return { credits: Number(userRow.credits || 0) };
 }
 
 function sleep(ms) {
@@ -558,23 +577,86 @@ async function sendMessageToFormTab(tabId, message) {
 
 async function withSolveLock(handler) {
   const state = await chrome.storage.local.get(STORAGE_KEYS.inFlightSolve);
-  if (state[STORAGE_KEYS.inFlightSolve]) {
+  const rawLock = state[STORAGE_KEYS.inFlightSolve];
+  const now = Date.now();
+  const isBooleanLock = rawLock === true;
+  const active = isBooleanLock || Boolean(rawLock?.active);
+  const startedAt = Number(rawLock?.startedAt || 0);
+  const hasTimestamp = Number.isFinite(startedAt) && startedAt > 0;
+  const isStale = hasTimestamp ? (now - startedAt > SOLVE_LOCK_TTL_MS) : false;
+
+  if (active && !isStale) {
     throw new Error("SOLVE_IN_PROGRESS");
   }
 
-  await chrome.storage.local.set({ [STORAGE_KEYS.inFlightSolve]: true });
+  await chrome.storage.local.set({
+    [STORAGE_KEYS.inFlightSolve]: {
+      active: true,
+      startedAt: now
+    }
+  });
 
   try {
     return await handler();
   } finally {
-    await chrome.storage.local.set({ [STORAGE_KEYS.inFlightSolve]: false });
+    await chrome.storage.local.remove(STORAGE_KEYS.inFlightSolve);
   }
 }
 
-async function loginWithGoogle() {
+async function initUserAccount(config, session) {
+  try {
+    const jwt = await createJwt(config, session.secret);
+    const client = new self.Appwrite.Client()
+      .setEndpoint(config.appwriteEndpoint)
+      .setProject(config.appwriteProjectId)
+      .setSession(session.secret);
+    const functions = new self.Appwrite.Functions(client);
+    const execution = await functions.createExecution({
+      functionId: config.appwriteFunctionSolveId,
+      body: JSON.stringify({ userId: session.userId, jwt }),
+      async: false,
+      path: "/init",
+      method: "POST",
+      headers: { "Content-Type": "application/json" }
+    });
+    const parsed = parseExecutionBody(execution);
+    if (typeof parsed?.credits === "number") {
+      return { credits: parsed.credits };
+    }
+  } catch {
+    // Non-critical: init failure does not block login.
+  }
+  return null;
+}
+
+async function loginWithGoogle(options = {}) {
   const config = await getConfig();
+  const forceReauth = Boolean(options.forceReauth);
+
+  // If we already have a valid session, reuse it instead of forcing OAuth.
+  const existing = await getSession();
+  if (!forceReauth && existing?.secret) {
+    try {
+      const user = await getAccount(config, existing.secret);
+      const session = {
+        userId: existing.userId || user.$id,
+        secret: existing.secret,
+        email: user.email || existing.email || "",
+        name: user.name || existing.name || "",
+        updatedAt: new Date().toISOString()
+      };
+      await setSession(session);
+      const credits = await getUserCredits(config, session).catch(() => ({ credits: 0 }));
+      return { session, credits: credits.credits };
+    } catch {
+      // Existing session is invalid/expired; continue with OAuth login flow.
+    }
+  }
+
   const redirectUrl = chrome.identity.getRedirectURL();
-  const oauthUrl = buildOAuthUrlWithSdk(config, redirectUrl, redirectUrl);
+  const oauthUrl = buildOAuthUrlWithSdk(config, redirectUrl, redirectUrl, {
+    prompt: forceReauth ? "select_account" : undefined
+  });
 
   let callbackUrl;
   try {
@@ -596,6 +678,29 @@ async function loginWithGoogle() {
   const error = getOAuthCallbackParam(parsed, "error");
 
   if (error) {
+    // Appwrite may return user_already_exists for an already-linked identity.
+    // In that case, keep the user logged in with the existing valid session.
+    const normalizedError = String(error).toLowerCase();
+    if (normalizedError.includes("user_already_exists")) {
+      const fallback = await getSession();
+      if (fallback?.secret) {
+        try {
+          const user = await getAccount(config, fallback.secret);
+          const session = {
+            userId: fallback.userId || user.$id,
+            secret: fallback.secret,
+            email: user.email || fallback.email || "",
+            name: user.name || fallback.name || "",
+            updatedAt: new Date().toISOString()
+          };
+          await setSession(session);
+          const credits = await getUserCredits(config, session).catch(() => ({ credits: 0 }));
+          return { session, credits: credits.credits };
+        } catch {
+          // Continue to throw the original OAuth error.
+        }
+      }
+    }
     throw new Error(`AUTH_ERROR:${error}`);
   }
 
@@ -628,8 +733,12 @@ async function loginWithGoogle() {
 
   await setSession(session);
 
-  const credits = await getUserCredits(config, session).catch(() => ({ credits: 0 }));
-  return { session, credits: credits.credits };
+  // Ensure user row exists and fetch real starter credits.
+  const initResult = await initUserAccount(config, session);
+  const credits = initResult !== null
+    ? initResult.credits
+    : (await getUserCredits(config, session).catch(() => ({ credits: 0 }))).credits;
+  return { session, credits };
 }
 
 async function refreshCredits() {
@@ -648,6 +757,14 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (!existing[STORAGE_KEYS.config]) {
     await chrome.storage.local.set({ [STORAGE_KEYS.config]: DEFAULT_CONFIG });
   }
+
+  // Clear stale lock state left behind from previous worker lifecycles.
+  await chrome.storage.local.remove(STORAGE_KEYS.inFlightSolve);
+});
+
+chrome.runtime.onStartup.addListener(async () => {
+  // Service workers can be terminated during solve; remove old lock on startup.
+  await chrome.storage.local.remove(STORAGE_KEYS.inFlightSolve);
 });
 
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
@@ -666,7 +783,7 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     }
 
     if (request?.action === "AUTH_LOGIN") {
-      const result = await loginWithGoogle();
+      const result = await loginWithGoogle({ forceReauth: request?.forceReauth });
       sendResponse({ ok: true, ...result });
       return;
     }
@@ -680,6 +797,15 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     if (request?.action === "GET_SESSION") {
       const session = await getSession();
       if (!session) {
+        sendResponse({ ok: true, authenticated: false });
+        return;
+      }
+
+      // Validate the stored session is still live with Appwrite.
+      try {
+        await getAccount(config, session.secret);
+      } catch {
+        await clearSession();
         sendResponse({ ok: true, authenticated: false });
         return;
       }

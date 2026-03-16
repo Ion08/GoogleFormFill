@@ -81,8 +81,9 @@ Use these project details:
 ## Notes
 
 - OpenRouter key is backend-only (never in extension).
-- Long-form timeout defaults to 600000 ms (10 minutes) and can be configured with `OPENROUTER_TIMEOUT_MS`.
-- Temporary provider failures can be retried with `OPENROUTER_MAX_RETRIES` (default 2).
+- OpenRouter request timeout defaults to 20000 ms and can be configured with `OPENROUTER_TIMEOUT_MS`.
+- Temporary provider failures can be retried with `OPENROUTER_MAX_RETRIES` (default 1).
+- Function-level deadline defaults to 25000 ms and can be configured with `FUNCTION_TIMEOUT_MS`.
 - `RATE_LIMIT_ENABLED=false` keeps rate limiting code inactive until you turn it on.
 - MVP includes manual/admin top-up by editing `users.credits` and writing `transactions` records with type `purchase`.
 - Image-based solving depends on the model and whether the question image URL is reachable from the AI provider.

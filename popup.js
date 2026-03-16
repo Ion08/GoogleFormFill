@@ -164,6 +164,13 @@ async function bootstrapSdkSession(session) {
 
 function mapErrorToMessage(code) {
   const normalized = String(code || "").toLowerCase();
+  if (normalized.startsWith("auth_error:")) {
+    const reason = normalized.slice("auth_error:".length);
+    if (reason === "missing_user_or_secret") {
+      return "Sign-in callback was incomplete. Please try signing in again.";
+    }
+    return `Sign-in failed: ${reason.replace(/_/g, " ")}.`;
+  }
   if (normalized.includes("not authorized") || normalized.includes("invalid origin")) {
     return "Appwrite rejected this request. Check Function execute permissions and users table read permissions for this user.";
   }
@@ -236,6 +243,11 @@ function mapErrorToMessage(code) {
     return "Backend returned a generic AI error. Redeploy solveForm from latest code, then verify PLATFORM_OPENROUTER_KEY and APPWRITE_API_KEY scopes in Appwrite Function settings.";
   }
 
+  if (normalized.startsWith("ai_error:config_missing_")) {
+    const missingKey = normalized.slice("ai_error:config_missing_".length).toUpperCase();
+    return `Appwrite Function is missing required env var: ${missingKey}.`;
+  }
+
   const messages = {
     AUTH_REQUIRED: "Please sign in first.",
     AUTH_PAGE_LOAD_FAILED: "Google sign-in page could not load. Check Appwrite OAuth provider and redirect domain settings.",
@@ -279,7 +291,7 @@ async function login() {
   ui.loginBtn.disabled = true;
 
   try {
-    const response = await sendMessage("AUTH_LOGIN");
+    const response = await sendMessage("AUTH_LOGIN", { forceReauth: true });
     if (!response?.ok) {
       throw new Error(response?.error || "AUTH_REQUIRED");
     }
