@@ -180,11 +180,11 @@ function mapErrorToMessage(code) {
   }
 
   if (normalized === "function_execution_timeout" || normalized.includes("function execution timed out")) {
-    return "The backend is still processing and exceeded the wait window. Try again in a moment or increase function timeout in Appwrite.";
+    return "The form is taking longer to solve. Please wait and retry once; backend retries are enabled for long forms.";
   }
 
   if (normalized === "function_execution_force_sync_timeout") {
-    return "Appwrite still handled this execution synchronously and hit the 30s limit. Reload the extension, then redeploy/check function execution settings in Appwrite.";
+    return "The form is taking longer to solve. Please wait and retry once; backend retries are enabled for long forms.";
   }
 
   if (normalized.startsWith("function_execution_failed") || normalized.startsWith("function_execution_canceled")) {
@@ -228,7 +228,7 @@ function mapErrorToMessage(code) {
   }
 
   if (normalized === "ai_error:openrouter_retries_exhausted") {
-    return "The AI service is slow right now and retries were exhausted. Please try again in a moment.";
+    return "The form is taking longer to solve. Please wait and retry once; backend retries are enabled for long forms.";
   }
 
   if (normalized === "ai_error:appwrite_permission_denied") {
