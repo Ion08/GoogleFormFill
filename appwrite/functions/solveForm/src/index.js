@@ -199,7 +199,7 @@ function buildPromptText(formTitle, questions) {
     "If the question asks for code/programs, provide code directly in the answer.",
     "Do not skip supported question types due to complexity or task scope.",
     "If an image is required to answer but is unclear, skip it with reason 'unclear_image'.",
-    "If you are uncertain, skip it with reason 'low_ai_confidence'.",
+    "Respond with long messages full with details , do not provide short answers",
     "Return only valid JSON with this exact shape:",
     '{"questions":{"<id>":{"status":"answered|skipped","answer":"string or array for checkbox","reason":"answered|unsupported_question_type|unclear_image|low_ai_confidence|insufficient_context","explanation":"short reasoning","confidence":0.0}}}',
     "Confidence must be between 0 and 1.",
