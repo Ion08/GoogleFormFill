@@ -587,8 +587,8 @@ async function callOpenRouter(questions, formTitle, deadline, trace = () => {}) 
 
   // FIX #1 (timeout): These were previously 600 000 ms (10 min) and 45 000 ms.
   // Sensible per-request caps. The overall deadline is the hard ceiling.
-  const configuredTimeoutMs = Number(getEnv("OPENROUTER_TIMEOUT_MS", "20000"));
-  const bodyTimeoutMs = Number(getEnv("OPENROUTER_BODY_TIMEOUT_MS", "15000"));
+  const configuredTimeoutMs = Number(getEnv("OPENROUTER_TIMEOUT_MS", "200000000"));
+  const bodyTimeoutMs = Number(getEnv("OPENROUTER_BODY_TIMEOUT_MS", "150000000"));
   const retryCount = Math.max(0, Number(getEnv("OPENROUTER_MAX_RETRIES", "1")));
 
   // FIX #1 (timeout): Never let a single attempt exceed remaining deadline.
