@@ -196,12 +196,19 @@ function buildPromptText(formTitle, questions) {
     "You are solving a Google Form for the current user.",
     "Answer the provided questions as accurately as possible.",
     "Be detailed and complete in every answer.",
+    "If a prompt has multiple sub-items (for example a, b, c ...), answer ALL sub-items in one final response.",
+    "Preserve labels from the prompt (for example a), b), c), 1), 2), 3)) and answer each label explicitly.",
+    "Do not return a single example when multiple outputs are requested.",
     "For SHORT_ANSWER and PARAGRAPH questions, always provide a best-effort answer.",
     "If the question asks for code/programs, provide complete runnable code directly in the answer.",
+    "For coding tasks, include full input handling, full logic, and final output statements.",
+    "When asked for multiple programs/functions, provide all requested programs, not just one.",
+    "Do not return templates, pseudo-code, TODO markers, or 'example only' snippets.",
     "For coding prompts, decide the implementation approach autonomously and do not ask the user how to implement it.",
     "Do not skip supported question types due to complexity or task scope.",
     "If an image is required to answer but is unclear, skip it with reason 'unclear_image'.",
-    "Respond with long messages full with details , do not provide short answers",
+    "For non-code tasks, provide concise but complete reasoning.",
+    "Before finalizing, verify that every required sub-part has a direct answer.",
     "Return only valid JSON with this exact shape:",
     '{"questions":{"<id>":{"status":"answered|skipped","answer":"string or array for checkbox","reason":"answered|unsupported_question_type|unclear_image|low_ai_confidence|insufficient_context","explanation":"short reasoning","confidence":0.0}}}',
     "Confidence must be between 0 and 1.",
@@ -575,7 +582,7 @@ async function enforceRateLimit(databases, userId) {
 // OpenRouter call from blowing past the Appwrite function execution limit.
 async function callOpenRouter(questions, formTitle, deadline, trace = () => {}) {
   const apiKey = getEnv("OPENROUTER_API_KEY") || getEnv("PLATFORM_OPENROUTER_KEY");
-  const model = getEnv("OPENROUTER_MODEL", "openai/gpt-4o-mini");
+  const model = getEnv("OPENROUTER_MODEL", "openai/gpt-4.1-mini");
   const referer = getEnv("OPENROUTER_REFERER", "");
 
   // FIX #1 (timeout): These were previously 600 000 ms (10 min) and 45 000 ms.
@@ -614,14 +621,14 @@ async function callOpenRouter(questions, formTitle, deadline, trace = () => {}) 
       {
         role: "system",
         content:
-          "Return only valid JSON. Solve common Google Form question types, skip personal-data prompts, provide detailed explanations, and for code-related prompts output complete runnable code without asking implementation follow-up questions."
+          "Return only valid JSON. Solve common Google Form question types, skip personal-data prompts, and provide complete direct answers. For coding prompts, always output full runnable code, solve every requested sub-part, preserve original labels (a/b/c or 1/2/3), and never ask the user how to implement it. Never return partial examples when the prompt requests a full solution."
       },
       {
         role: "user",
         content: buildMultimodalMessage(formTitle, questions)
       }
     ],
-    temperature: 0.2
+    temperature: 0.0
   });
 
   for (let attempt = 0; attempt <= retryCount; attempt++) {
@@ -769,9 +776,9 @@ module.exports = async ({ req, res, log, error }) => {
   const requestId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   let stage = "init";
 
-  // FIX #1 (timeout): Hard overall deadline — default 25 s, configurable via
-  // FUNCTION_TIMEOUT_MS. Set this below your Appwrite function timeout limit.
-  const deadlineMs = Number(getEnv("FUNCTION_TIMEOUT_MS", "25000"));
+  // Hard overall deadline. Keep this safely below the Appwrite function timeout
+  // so the catch block can still return a JSON error response.
+  const deadlineMs = Number(getEnv("FUNCTION_TIMEOUT_MS", "12000"));
   const deadline = createDeadline(deadlineMs);
 
   const trace = (name, meta = {}) => {
