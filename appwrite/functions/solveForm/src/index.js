@@ -17,7 +17,7 @@ const SUPPORTED_SOLVE_TYPES = new Set([
 ]);
 
 // FIX #1 (timeout): Lowered confidence threshold slightly and tightened timeouts
-const LOW_CONFIDENCE_THRESHOLD = 0.55;
+const LOW_CONFIDENCE_THRESHOLD = 0.35;
 const MAX_IMAGE_COUNT_PER_QUESTION = 3;
 
 function getEnv(name, fallback = "") {
@@ -322,6 +322,24 @@ function coerceAiResult(question, aiResult) {
   }
 
   if (confidence !== null && confidence < LOW_CONFIDENCE_THRESHOLD) {
+    // Prefer a best-effort fill for supported question types when we still
+    // have a valid answer string/list, even at lower confidence.
+    if (question.supported) {
+      return {
+        id: question.id,
+        type: question.type,
+        question: question.question,
+        status: "answered",
+        skipReason: null,
+        reasonLabel: humanizeReason("answered"),
+        explanation:
+          explanation ||
+          "Best-effort answer used despite low confidence to avoid unnecessary skips.",
+        confidence,
+        answer: normalizedAnswer
+      };
+    }
+
     return buildSkippedResult(
       question,
       "low_ai_confidence",
@@ -357,6 +375,14 @@ function sleep(ms) {
 
 function isRetryableStatus(status) {
   return [408, 409, 425, 429, 500, 502, 503, 504, 524].includes(Number(status));
+}
+
+function isOpenRouterTimeoutErrorMessage(message) {
+  return (
+    message.startsWith("OPENROUTER_TIMEOUT_") ||
+    message.startsWith("OPENROUTER_BODY_TIMEOUT_") ||
+    message.startsWith("OPENROUTER_OVERALL_DEADLINE_EXCEEDED")
+  );
 }
 
 function summarizeQuestionSet(questions) {
@@ -587,9 +613,10 @@ async function callOpenRouter(questions, formTitle, deadline, trace = () => {}) 
 
   // FIX #1 (timeout): These were previously 600 000 ms (10 min) and 45 000 ms.
   // Sensible per-request caps. The overall deadline is the hard ceiling.
-  const configuredTimeoutMs = Number(getEnv("OPENROUTER_TIMEOUT_MS", "200000000"));
-  const bodyTimeoutMs = Number(getEnv("OPENROUTER_BODY_TIMEOUT_MS", "150000000"));
-  const retryCount = Math.max(0, Number(getEnv("OPENROUTER_MAX_RETRIES", "1")));
+  const configuredTimeoutMs = Number(getEnv("OPENROUTER_TIMEOUT_MS", "90000"));
+  const bodyTimeoutMs = Number(getEnv("OPENROUTER_BODY_TIMEOUT_MS", "90000"));
+  // Always keep at least one retry for transient timeout conditions on long forms.
+  const retryCount = Math.max(1, Number(getEnv("OPENROUTER_MAX_RETRIES", "1")));
 
   // FIX #1 (timeout): Never let a single attempt exceed remaining deadline.
   const effectiveTimeoutMs = Math.min(configuredTimeoutMs, deadline.remaining() - 1000);
@@ -736,8 +763,8 @@ async function callOpenRouter(questions, formTitle, deadline, trace = () => {}) 
 }
 
 async function callOpenRouterInBatches(questions, formTitle, deadline, trace = () => {}) {
-  // FIX #1 (timeout): Larger default batch size means fewer round-trips.
-  const batchSize = Math.max(1, Number(getEnv("OPENROUTER_BATCH_SIZE", "10")));
+  // Smaller default batches reduce response body size and timeout risk.
+  const batchSize = Math.max(1, Number(getEnv("OPENROUTER_BATCH_SIZE", "4")));
   const batches = chunkQuestions(questions, batchSize);
   const merged = {};
 
@@ -757,7 +784,43 @@ async function callOpenRouterInBatches(questions, formTitle, deadline, trace = (
       batchSummary: summarizeQuestionSet(batch)
     });
 
-    const result = await callOpenRouter(batch, formTitle, deadline, trace);
+    let result;
+    try {
+      result = await callOpenRouter(batch, formTitle, deadline, trace);
+    } catch (err) {
+      const message = String(err?.message || "");
+      const shouldSplit = batch.length > 1 && isOpenRouterTimeoutErrorMessage(message);
+
+      trace("openrouter.batch.error", {
+        batchNumber: index + 1,
+        totalBatches: batches.length,
+        batchSize: batch.length,
+        shouldSplit,
+        error: message.slice(0, 300)
+      });
+
+      if (shouldSplit) {
+        const midpoint = Math.ceil(batch.length / 2);
+        const left = batch.slice(0, midpoint);
+        const right = batch.slice(midpoint);
+
+        // Replace current batch with two smaller batches and retry immediately.
+        batches.splice(index, 1, left, right);
+
+        trace("openrouter.batch.split", {
+          originalBatchSize: batch.length,
+          leftSize: left.length,
+          rightSize: right.length,
+          newTotalBatches: batches.length
+        });
+
+        index -= 1;
+        continue;
+      }
+
+      throw err;
+    }
+
     Object.assign(merged, result || {});
 
     trace("openrouter.batch.done", {
@@ -778,7 +841,7 @@ module.exports = async ({ req, res, log, error }) => {
 
   // Hard overall deadline. Keep this safely below the Appwrite function timeout
   // so the catch block can still return a JSON error response.
-  const deadlineMs = Number(getEnv("FUNCTION_TIMEOUT_MS", "12000"));
+  const deadlineMs = Number(getEnv("FUNCTION_TIMEOUT_MS", "110000"));
   const deadline = createDeadline(deadlineMs);
 
   const trace = (name, meta = {}) => {
