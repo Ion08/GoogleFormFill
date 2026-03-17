@@ -195,8 +195,10 @@ function buildPromptText(formTitle, questions) {
   const lines = [
     "You are solving a Google Form for the current user.",
     "Answer the provided questions as accurately as possible.",
+    "Be detailed and complete in every answer.",
     "For SHORT_ANSWER and PARAGRAPH questions, always provide a best-effort answer.",
-    "If the question asks for code/programs, provide code directly in the answer.",
+    "If the question asks for code/programs, provide complete runnable code directly in the answer.",
+    "For coding prompts, decide the implementation approach autonomously and do not ask the user how to implement it.",
     "Do not skip supported question types due to complexity or task scope.",
     "If an image is required to answer but is unclear, skip it with reason 'unclear_image'.",
     "Respond with long messages full with details , do not provide short answers",
@@ -612,7 +614,7 @@ async function callOpenRouter(questions, formTitle, deadline, trace = () => {}) 
       {
         role: "system",
         content:
-          "Return only valid JSON. Solve common Google Form question types, skip personal-data prompts, and provide short explanations."
+          "Return only valid JSON. Solve common Google Form question types, skip personal-data prompts, provide detailed explanations, and for code-related prompts output complete runnable code without asking implementation follow-up questions."
       },
       {
         role: "user",
