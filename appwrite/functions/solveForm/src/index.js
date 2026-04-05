@@ -765,71 +765,95 @@ async function callOpenRouter(questions, formTitle, deadline, trace = () => {}) 
 async function callOpenRouterInBatches(questions, formTitle, deadline, trace = () => {}) {
   // Smaller default batches reduce response body size and timeout risk.
   const batchSize = Math.max(1, Number(getEnv("OPENROUTER_BATCH_SIZE", "4")));
-  const batches = chunkQuestions(questions, batchSize);
+  const concurrency = Math.max(1, Number(getEnv("OPENROUTER_BATCH_CONCURRENCY", "2")));
+  const batches = chunkQuestions(questions, batchSize).map((items, idx) => ({
+    id: idx + 1,
+    items
+  }));
   const merged = {};
+  const queue = [...batches];
 
   trace("openrouter.batch.config", {
     batchSize,
-    totalBatches: batches.length,
+    concurrency,
+    totalBatches: queue.length,
     totalQuestions: questions.length
   });
 
-  for (let index = 0; index < batches.length; index++) {
-    deadline.assert();
+  let workerCursor = 0;
 
-    const batch = batches[index];
-    trace("openrouter.batch.start", {
-      batchNumber: index + 1,
-      totalBatches: batches.length,
-      batchSummary: summarizeQuestionSet(batch)
-    });
+  const worker = async (workerId) => {
+    while (queue.length > 0) {
+      deadline.assert();
+      const batch = queue.shift();
+      if (!batch) return;
 
-    let result;
-    try {
-      result = await callOpenRouter(batch, formTitle, deadline, trace);
-    } catch (err) {
-      const message = String(err?.message || "");
-      const shouldSplit = batch.length > 1 && isOpenRouterTimeoutErrorMessage(message);
-
-      trace("openrouter.batch.error", {
-        batchNumber: index + 1,
-        totalBatches: batches.length,
-        batchSize: batch.length,
-        shouldSplit,
-        error: message.slice(0, 300)
+      workerCursor += 1;
+      trace("openrouter.batch.start", {
+        workerId,
+        workerCursor,
+        queueRemaining: queue.length,
+        batchId: batch.id,
+        batchSummary: summarizeQuestionSet(batch.items)
       });
 
-      if (shouldSplit) {
-        const midpoint = Math.ceil(batch.length / 2);
-        const left = batch.slice(0, midpoint);
-        const right = batch.slice(midpoint);
+      let result;
+      try {
+        result = await callOpenRouter(batch.items, formTitle, deadline, trace);
+      } catch (err) {
+        const message = String(err?.message || "");
+        const shouldSplit =
+          batch.items.length > 1 && isOpenRouterTimeoutErrorMessage(message);
 
-        // Replace current batch with two smaller batches and retry immediately.
-        batches.splice(index, 1, left, right);
-
-        trace("openrouter.batch.split", {
-          originalBatchSize: batch.length,
-          leftSize: left.length,
-          rightSize: right.length,
-          newTotalBatches: batches.length
+        trace("openrouter.batch.error", {
+          workerId,
+          batchId: batch.id,
+          batchSize: batch.items.length,
+          shouldSplit,
+          error: message.slice(0, 300)
         });
 
-        index -= 1;
-        continue;
+        if (shouldSplit) {
+          const midpoint = Math.ceil(batch.items.length / 2);
+          const leftItems = batch.items.slice(0, midpoint);
+          const rightItems = batch.items.slice(midpoint);
+
+          queue.unshift(
+            { id: `${batch.id}.L`, items: leftItems },
+            { id: `${batch.id}.R`, items: rightItems }
+          );
+
+          trace("openrouter.batch.split", {
+            batchId: batch.id,
+            originalBatchSize: batch.items.length,
+            leftSize: leftItems.length,
+            rightSize: rightItems.length,
+            queueLengthAfterSplit: queue.length
+          });
+
+          continue;
+        }
+
+        throw err;
       }
 
-      throw err;
+      Object.assign(merged, result || {});
+
+      trace("openrouter.batch.done", {
+        workerId,
+        batchId: batch.id,
+        returnedKeys: Object.keys(result || {}).length,
+        accumulatedKeys: Object.keys(merged).length,
+        queueRemaining: queue.length
+      });
     }
+  };
 
-    Object.assign(merged, result || {});
-
-    trace("openrouter.batch.done", {
-      batchNumber: index + 1,
-      totalBatches: batches.length,
-      returnedKeys: Object.keys(result || {}).length,
-      accumulatedKeys: Object.keys(merged).length
-    });
-  }
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, queue.length || 1) }, (_, i) =>
+      worker(i + 1)
+    )
+  );
 
   return merged;
 }

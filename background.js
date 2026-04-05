@@ -306,6 +306,22 @@ function parseExecutionBody(execution) {
   return null;
 }
 
+function extractSolvePayloadFromLogs(logValue) {
+  const lines = String(logValue || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    const parsed = coerceParsedPayload(line);
+    if (looksLikeSolvePayload(parsed)) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
 function isTerminalExecutionStatus(status) {
   const normalized = String(status || "").toLowerCase();
   return ["completed", "succeeded", "failed", "canceled", "cancelled", "done"].includes(normalized);
@@ -334,12 +350,19 @@ function getExecutionErrorHint(execution) {
 
 async function tryGetTerminalExecutionBody(config, session, execution, pollIntervalMs) {
   let current = execution;
-  const bodySettleAttempts = 5;
+  // On Appwrite cloud the execution can be marked completed before responseBody
+  // is fully propagated; poll a bit longer to avoid false empty-response errors.
+  const bodySettleAttempts = 12;
 
   for (let i = 0; i < bodySettleAttempts; i++) {
     const parsed = parseExecutionBody(current);
     if (parsed && typeof parsed === "object") {
       return { parsed, execution: current };
+    }
+
+    const parsedFromLogs = extractSolvePayloadFromLogs(current?.logs);
+    if (parsedFromLogs && typeof parsedFromLogs === "object") {
+      return { parsed: parsedFromLogs, execution: current };
     }
 
     if (i < bodySettleAttempts - 1) {
