@@ -196,6 +196,7 @@ function buildPromptText(formTitle, questions) {
     "You are solving a Google Form for the current user.",
     "Answer the provided questions as accurately as possible.",
     "Be detailed and complete in every answer.",
+     "Don't write ore than neccesary",
     "If a prompt has multiple sub-items (for example a, b, c ...), answer ALL sub-items in one final response.",
     "Preserve labels from the prompt (for example a), b), c), 1), 2), 3)) and answer each label explicitly.",
     "Do not return a single example when multiple outputs are requested.",
