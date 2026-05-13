@@ -194,7 +194,7 @@ function normalizeAnswerForType(question, rawAnswer) {
 function buildPromptText(formTitle, questions) {
   const lines = [
     "You are solving a Google Form for the current user.",
-    "Answer the provided questions as accurately as possible.",
+    "Answer the provided questions as accurately as possible in the least words possible.",
     "Be complete in every answer.",
      "Don't write more than neccesary",
     "If a prompt has multiple sub-items (for example a, b, c ...), answer ALL sub-items in one final response.",
