@@ -1,3 +1,18 @@
 {
-    "projectId": "69b5015800281183d258"
+    "projectId": "69b5015800281183d258",
+    "functions": [
+        {
+            "$id": "69b50ac000155a09f932",
+            "name": "solveForm",
+            "runtime": "node-20.0",
+            "path": "appwrite/functions/solveForm",
+            "entrypoint": "src/index.js",
+            "ignore": ["node_modules", ".npm"],
+            "execute": ["users"],
+            "events": [],
+            "schedule": "",
+            "timeout": 120,
+            "enabled": true
+        }
+    ]
 }
