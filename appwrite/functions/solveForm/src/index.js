@@ -194,21 +194,20 @@ function normalizeAnswerForType(question, rawAnswer) {
 function buildPromptText(formTitle, questions) {
   const lines = [
     "You are solving a Google Form for the current user.",
-    "Answer the provided questions as accurately as possible in the least words possible.",
-    "Be complete in every answer.",
-     "Don't write more than neccesary",
+    "Keep every answer as short as possible while still being valid.",
+    "Do not add explanations, introductions, or extra wording to the answer field.",
+    "For SHORT_ANSWER and PARAGRAPH questions, use one short phrase or one short sentence unless the prompt clearly requires more.",
+    "For MULTIPLE_CHOICE and DROPDOWN questions, return only the selected option text.",
+    "For CHECKBOX questions, return only the selected option texts as a JSON array.",
     "If a prompt has multiple sub-items (for example a, b, c ...), answer ALL sub-items in one final response.",
     "Preserve labels from the prompt (for example a), b), c), 1), 2), 3)) and answer each label explicitly.",
     "Do not return a single example when multiple outputs are requested.",
-    "For SHORT_ANSWER and PARAGRAPH questions, always provide a best-effort answer.",
-    "If the question asks for code/programs, provide complete runnable code directly in the answer.",
-    "For coding tasks, include full input handling, full logic, and final output statements.",
-    "When asked for multiple programs/functions, provide all requested programs, not just one.",
+    "If the question asks for code/programs, provide the shortest complete runnable code that satisfies the prompt.",
     "Do not return templates, pseudo-code, TODO markers, or 'example only' snippets.",
     "For coding prompts, decide the implementation approach autonomously and do not ask the user how to implement it.",
     "Do not skip supported question types due to complexity or task scope.",
     "If an image is required to answer but is unclear, skip it with reason 'unclear_image'.",
-    "For non-code tasks, provide concise but complete reasoning.",
+    "For non-code tasks, provide concise but complete reasoning only in the explanation field.",
     "Before finalizing, verify that every required sub-part has a direct answer.",
     "Return only valid JSON with this exact shape:",
     '{"questions":{"<id>":{"status":"answered|skipped","answer":"string or array for checkbox","reason":"answered|unsupported_question_type|unclear_image|low_ai_confidence|insufficient_context","explanation":"short reasoning","confidence":0.0}}}',
@@ -645,11 +644,12 @@ async function callOpenRouter(questions, formTitle, deadline, trace = () => {}) 
     model,
     stream: false,
     ...(hasImages ? {} : { response_format: { type: "json_object" } }),
+    max_tokens: Number(getEnv("OPENROUTER_MAX_OUTPUT_TOKENS", "256")),
     messages: [
       {
         role: "system",
         content:
-          "Return only valid JSON. Solve common Google Form question types, skip personal-data prompts, and provide complete direct answers. For coding prompts, always output full runnable code, solve every requested sub-part, preserve original labels (a/b/c or 1/2/3), and never ask the user how to implement it. Never return partial examples when the prompt requests a full solution."
+          "Return only valid JSON. Solve common Google Form question types, skip personal-data prompts, and keep the answer field as short as possible. Never put explanations inside the answer field; use the explanation field for that. For coding prompts, provide the shortest complete runnable code that satisfies the prompt."
       },
       {
         role: "user",
