@@ -3,16 +3,18 @@
     "functions": [
         {
             "$id": "69b50ac000155a09f932",
-            "name": "solveForm",
-            "runtime": "node-20.0",
+            "name": "SolveFucntion",
+            "runtime": "node-25",
             "path": "appwrite/functions/solveForm",
             "entrypoint": "src/index.js",
             "ignore": ["node_modules", ".npm"],
-            "execute": ["users"],
+            "execute": ["any", "users"],
             "events": [],
             "schedule": "",
             "timeout": 120,
-            "enabled": true
+            "enabled": true,
+            "logging": true,
+            "commands": "npm install"
         }
     ]
 }
